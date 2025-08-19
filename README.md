@@ -74,7 +74,7 @@ python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateu
 
 ## اجرای اسکریپت
 
-پس از نصب و تنظیم، ترمینال را در پوشه پروژه باز کرده و فایل زیر را اجرا کنید:
+پس از نصب و تنظیم، فایل زیر را اجرا کنید:
 
 ```bash
 run python mt5-telegram.bat
