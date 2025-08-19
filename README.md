@@ -32,21 +32,11 @@
 
 ### قدم دوم: نصب کتابخانه‌های مورد نیاز
 
-یک ترمینال (CMD یا PowerShell) در پوشه پروژه باز کرده و دستور زیر را برای نصب تمام کتابخانه‌های مورد نیاز اجرا کنید:
+یک ترمینال (CMD یا PowerShell) در پوشه پروژه باز کرده و دستورات را به ترتیب برای نصب تمام کتابخانه‌های مورد نیاز اجرا کنید:
 
-```bash
-pip install -r requirements.txt
-```
-
-*(محتوای فایل `requirements.txt`):*
-
-```
-MetaTrader5
-python-telegram-bot==13.15
-pytz
-python-dateutil
-```
-
+python -m pip install pip-review
+python -m pip_review --auto
+python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
 ### قدم سوم: تنظیمات اسکریپت
 
 فایل اصلی اسکریپت پایتون (`bot_script.py`) را با یک ویرایشگر متن باز کرده و بخش «تنظیمات اصلی» را پیدا کنید. مقادیر زیر را با اطلاعات شخصی خودتان جایگزین کنید:
