@@ -101,6 +101,7 @@ run python mt5-telegram.bat
 تصاویر 
 
 
-<img width="575" height="628" alt="1" src="https://github.com/user-attachments/assets/24c18c31-86d2-4a43-ad1b-e6c78b5eaee4" />
-<img width="575" height="628" alt="2" "https://github.com/user-attachments/assets/f41b1685-fd09-4580-a03d-51da68985d4b" />
+<img width="575" height="628" alt="Screenshot 2025-08-19 194019" src="https://github.com/user-attachments/assets/24c18c31-86d2-4a43-ad1b-e6c78b5eaee4" />
+<gif width="575" height="628" alt="2" "https://github.com/user-attachments/assets/07e2a2a2-8a25-4a39-a419-3cd1c50b108e" />
+
 
