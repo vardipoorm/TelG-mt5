@@ -102,6 +102,7 @@ run python mt5-telegram.bat
 
 
 <img width="575" height="628" alt="Screenshot 2025-08-19 194019" src="https://github.com/user-attachments/assets/24c18c31-86d2-4a43-ad1b-e6c78b5eaee4" />
-<gif width="575" height="628" alt="2" "https://github.com/user-attachments/assets/07e2a2a2-8a25-4a39-a419-3cd1c50b108e" />
+![Telegram_6L3qWwCmZc](https://github.com/user-attachments/assets/b55ad7d9-8cf1-4715-912d-fb0524051238)
+
 
 
