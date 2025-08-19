@@ -73,3 +73,7 @@ run python mt5-telegram.bat
       * ... و بقیه دستوراتی که تعریف شده‌اند.
 
 -----
+
+تصاویر 
+<img width="575" height="628" alt="Screenshot 2025-08-19 194019" src="https://github.com/user-attachments/assets/24c18c31-86d2-4a43-ad1b-e6c78b5eaee4" />
+
