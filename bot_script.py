@@ -204,8 +204,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             starting_balance_period = balance_at_period_end - total_profit
             
             # --- گرفتن اطلاعات بالانس تاریخی ---
-            balance_equity_line = f"**موجودی انتهای بازه:**`{balance_at_period_end:,.2f}`|**موجودی ابتدای بازه:** `{starting_balance_period:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
-
+            balance_equity_line = f"**موجودی ابتدای بازه:** `{starting_balance_period:,.2f}`\n**موجودی انتهای بازه:**`{balance_at_period_end:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
         
         profit_line = f"**سود اکانت(حال):**`{true_total_account_profit:>8.2f}$`|**سود بازه:** `{total_profit:,.2f}$`\n"
 
@@ -662,4 +661,5 @@ if __name__ == "__main__":
                 mt5.shutdown()
             print("Script exited gracefully.")    
     
+
 
