@@ -107,6 +107,8 @@ run python mt5-telegram.bat
 
 <img width="490" height="953" alt="image" src="https://github.com/user-attachments/assets/a0d95b7e-8199-44ee-8031-1c72b09a3875" />
 
+<img width="483" height="303" alt="image" src="https://github.com/user-attachments/assets/7a847066-a390-446e-9976-d9742f6a1425" />
+
 
 
 
