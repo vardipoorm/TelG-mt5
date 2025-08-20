@@ -60,7 +60,7 @@ Success! Command list updated. /help
 ```bash
 python -m pip install pip-review
 python -m pip_review --auto
-python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
+python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi
 ```
 ### قدم سوم: تنظیمات اسکریپت
 
@@ -105,7 +105,8 @@ run python mt5-telegram.bat
 
 <img width="575" height="628" alt="Screenshot 2025-08-19 194019" src="https://github.com/user-attachments/assets/24c18c31-86d2-4a43-ad1b-e6c78b5eaee4" />
 
-![Telegram_6L3qWwCmZc](https://github.com/user-attachments/assets/bafd13cc-8815-453d-9df0-142e13abc498)
+<img width="490" height="953" alt="image" src="https://github.com/user-attachments/assets/a0d95b7e-8199-44ee-8031-1c72b09a3875" />
+
 
 
 
