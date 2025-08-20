@@ -2,6 +2,11 @@
 
 این اسکریپت پایتون به ترمینال متاتریدر ۵ شما متصل شده و رویدادهای معاملاتی را به صورت لحظه‌ای به تلگرام شما ارسال می‌کند. همچنین قابلیت دریافت گزارش‌های معاملاتی از طریق دستورات تلگرام را داراست.
 
+اگر به هر دلیلی از ربات خوشت اومد این ادرس Ton ولت منه هر چی ;کرمته :)
+```bash
+UQDCMQm4IiKfkbK7knZnDiIJ4zqzBkmx7ozJDk1Uk6OQrNHG
+```
+
 ## قابلیت‌ها
 
   * اعلان لحظه‌ای برای باز شدن اردرهای در حال انتظار (Pending Orders).
@@ -106,6 +111,7 @@ run python mt5-telegram.bat
 <img width="575" height="628" alt="Screenshot 2025-08-19 194019" src="https://github.com/user-attachments/assets/24c18c31-86d2-4a43-ad1b-e6c78b5eaee4" />
 
 <img width="490" height="953" alt="image" src="https://github.com/user-attachments/assets/a0d95b7e-8199-44ee-8031-1c72b09a3875" />
+
 
 <img width="483" height="303" alt="image" src="https://github.com/user-attachments/assets/7a847066-a390-446e-9976-d9742f6a1425" />
 
