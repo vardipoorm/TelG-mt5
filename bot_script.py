@@ -796,11 +796,11 @@ def main():
                     position_lines.append(header)
                     
                     # اضافه کردن جزئیات هر پوزیشن به لیست
-                    p_sign = "+" if profit > 0 else ""
                     for ticket, position in last_known_positions.items():
                         side = "Buy" if position.type == mt5.POSITION_TYPE_BUY else "Sell"
                         lot  = position.volume
                         profit = position.profit
+                        p_sign = "+" if profit > 0 else ""
                         #header = f"Symbol  |Side  |Lots   |Profit"
                         line = f"{position.symbol:<8}|{side:>5} |{lot:>6.2f} |{p_sign}{profit:>8.2f}$"
                         # position_lines.append(header)
