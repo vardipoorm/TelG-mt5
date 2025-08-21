@@ -65,7 +65,7 @@ def determine_broker_timezone():
 
 # ========================= تنظیمات اصلی =========================
 TOKEN = ""
-#CHAT_ID = 
+
 CHAT_ID = 
 
 CHECK_INTERVAL = 5 # فاصله زمانی بین هر چک در حالت عادی
@@ -802,7 +802,7 @@ def main():
                         profit = position.profit
                         p_sign = "+" if profit > 0 else ""
                         #header = f"Symbol  |Side  |Lots   |Profit"
-                        line = f"{position.symbol:<8}|{side:>5} |{lot:>6.2f} |{p_sign}{profit:>8.2f}$"
+                        line = f"{position.symbol:<8}|{side:>5} |{lot:>6.2f} | {p_sign}{profit:,.2f} $"
                         # position_lines.append(header)
                         position_lines.append(line)
                     
