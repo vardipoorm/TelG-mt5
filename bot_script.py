@@ -503,7 +503,7 @@ def _24H_report(update, context):
 def _3days_report(update, context):
     update.message.reply_text("در حال تهیه گزارش ۳ روز گذشته...")
     end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=2), datetime.min.time())
+    naive_start_time = datetime.combine(end_time.date() - timedelta(days=3), datetime.min.time())
     start_time = make_aware(naive_start_time)
     generate_and_send_report(update, context, start_time, end_time, "۳ روز گذشته")
     
