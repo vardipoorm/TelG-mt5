@@ -64,8 +64,8 @@ Success! Command list updated. /help
 
 ```bash
 pip install pip-review
-pip_review --auto
-python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask
+pip-review --auto
+pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask
 
 ```
 ### قدم سوم: تنظیمات اسکریپت
