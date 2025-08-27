@@ -63,9 +63,10 @@ Success! Command list updated. /help
 یک ترمینال (CMD یا PowerShell) باز کرده و دستورات را به ترتیب برای نصب تمام کتابخانه‌های مورد نیاز اجرا کنید:
 
 ```bash
-python -m pip install pip-review
-python -m pip_review --auto
-python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi
+pip install pip-review
+pip_review --auto
+python -m pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask
+
 ```
 ### قدم سوم: تنظیمات اسکریپت
 
