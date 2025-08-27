@@ -170,17 +170,26 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         return
 
     report_lines, total_profit, closed_trades_count, win_count = [], 0.0, 0, 0
+    # --- این خط جدید را اضافه کنید ---
+    total_balance_change_period = 0.0 
     trade_counter = 1
     commission = 0.0
     swap = 0.0
     positions = {}
+    # این حلقه برای گرفتم معاملات کل تاریخچه از 5 سال گذشته تا الان هست بجز اون شرط زمان که داخلش هست
     for deal in deals:
         # --- این خط را اضافه کنید تا تراکنش‌های غیرمعاملاتی نادیده گرفته شوند ---
         if deal.position_id == 0:
             continue # این دیل را نادیده بگیر و برو سراغ دیل بعدی
-        total_profit += deal.commission + deal.swap
-        commission += deal.commission
-        swap += deal.swap
+        # --- این بلوک کد جدید را اضافه کنید ---
+        # این بلاک برای محاسبه ی این متغییر ها در بازه ی گزارش است
+        deal_time = datetime.fromtimestamp(deal.time, tz=pytz.utc)
+        if start_time <= deal_time <= end_time:
+            total_balance_change_period += deal.profit + deal.commission + deal.swap
+            commission += deal.commission
+            swap += deal.swap
+        # --- پایان بلوک جدید ---
+        total_profit += deal.commission + deal.swap # سود کل معاملات تاریخچه نه بازه
         # --- بخش جدید برای تجمیع اطلاعات پوزیشن ---
         position_id = deal.position_id
         if position_id not in positions:
@@ -280,14 +289,16 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         # چک می‌کنیم که آیا گزارش تا لحظه حال است یا یک گزارش تاریخی است
         # (با یک بازه خطای ۵ ثانیه‌ای)
         if abs((end_time - get_server_time()).total_seconds()) < 5:
+            print("Generating real-time report...")
             # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
-            starting_balance_period = account_info.balance - total_profit
+            starting_balance_period = account_info.balance - total_balance_change_period
             # --- بخش جدید: گرفتن اطلاعات بالانس و اکوییتی ---
             account_info = mt5.account_info()
             balance_equity_line = f"**موجودی ابتدای بازه:**`{starting_balance_period:,.2f}`\n**موجودی(حال):**`{account_info.balance:>8.2f}`**|اکوییتی(حال):**`{account_info.equity:,.2f}`\n" if account_info else ""
             display_end_time = end_time
 
         else:
+            print("Generating historical report...")
             # این یک گزارش تاریخ خاص است، از فرمول پیچیده‌تر استفاده کن
             # ابتدا سود معاملاتی که بعد از بازه گزارش انجام شده را پیدا می‌کنیم
             deals_after_period = mt5.history_deals_get(end_time, get_server_time())
@@ -296,19 +307,20 @@ def generate_and_send_report(update, context, start_time, end_time, title):
                 for d in deals_after_period:
                     if d.entry in (mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT):
                         profit_after_period += d.profit + d.commission + d.swap
-            
+            # print(f"Profit from deals after the period: {profit_after_period}")
             # بالانس در انتهای بازه = بالانس فعلی - سود معاملات بعدی
             balance_at_period_end = account_info.balance - profit_after_period
-            
+            # print(f"Current balance: {account_info.balance}")
+            # print(f"Balance at period end: {balance_at_period_end}")
             # بالانس ابتدای بازه = بالانس انتهای بازه - سود خود بازه
-            starting_balance_period = balance_at_period_end - total_profit
-            
+            starting_balance_period = balance_at_period_end - total_balance_change_period
+
             # --- گرفتن اطلاعات بالانس تاریخی ---
             balance_equity_line = f"**موجودی ابتدای بازه:** `{starting_balance_period:,.2f}`\n**موجودی انتهای بازه:**`{balance_at_period_end:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
             # برای گزارش‌های تاریخی، یک روز از تاریخ پایان کم می‌کنیم تا بازه درست نمایش داده شود
             display_end_time = end_time - timedelta(days=1)    
 
-        profit_line = f"**سود اکانت(حال):**`{true_total_account_profit:>8.2f}$`|**سود بازه:** `{total_profit:,.2f}$`\n"
+        profit_line = f"**سود اکانت(حال):**`{true_total_account_profit:>8.2f}$`|**سود بازه:** `{total_balance_change_period:,.2f}$`\n"
 
         # --- محاسبه درصد رشد کل اکانت ---
         initial_deposit = account_info.balance - true_total_account_profit
@@ -321,7 +333,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         # --- محاسبه درصد رشد بازه زمانی ---
         period_growth_percentage = 0.0
         if starting_balance_period != 0:
-            period_growth_percentage = (total_profit / starting_balance_period) * 100
+            period_growth_percentage = (total_balance_change_period / starting_balance_period) * 100
         period_growth_sign = "+" if period_growth_percentage >= 0 else ""
         period_growth_str = f"{period_growth_sign}{period_growth_percentage:.2f}%"
 
@@ -967,24 +979,23 @@ if __name__ == "__main__":
         print("Retrying timezone detection in 10 seconds...")
         time.sleep(10)
 
-    # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن   
-        try:
-            main()
-        except KeyboardInterrupt:
-            send_telegram("ℹ️ *Script Stopped Manually*")
-            print("\nScript stopped by user.")
-        except Exception as e:
-            send_telegram(f"❌ *CRITICAL ERROR*\nBot has crashed!\nError: {e}")
-            print(f"Critical Error: {e}")
-        finally:
-            if updater and updater.running:
-                # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
-                print("{please wait}Stopping the bot updater...")
-                updater.stop()
-                print("Updater stopped.")
-            if mt5.terminal_info():
-                mt5.shutdown()
-            print("Script exited gracefully.")    
-    
+    # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن           
+    try:
+        main()
+    except KeyboardInterrupt:
+        send_telegram("ℹ️ *Script Stopped Manually*")
+        print("\nScript stopped by user.")
+    except Exception as e:
+        send_telegram(f"❌ *CRITICAL ERROR*\nBot has crashed!\nError: {e}")
+        print(f"Critical Error: {e}")
+    finally:
+        if updater and updater.running:
+            # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
+            print("{please wait}Stopping the bot updater...")
+            updater.stop()
+            print("Updater stopped.")
+        if mt5.terminal_info():
+            mt5.shutdown()
+        print("Script exited gracefully.")    
 
 
