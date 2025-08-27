@@ -497,8 +497,7 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
 def _24H_report(update, context):
     update.message.reply_text("در حال تهیه گزارش 24 ساعته گذشته...")
     end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=1), datetime.min.time())
-    start_time = make_aware(naive_start_time)
+    start_time = end_time - timedelta(hours=24)
     generate_and_send_report(update, context, start_time, end_time, "۲۴ ساعت گذشته")
 
 def _3days_report(update, context):
@@ -981,4 +980,5 @@ if __name__ == "__main__":
                 mt5.shutdown()
             print("Script exited gracefully.")    
     
+
 
