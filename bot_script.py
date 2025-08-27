@@ -954,14 +954,20 @@ def main():
     
 # ====================== اجرای اسکریپت ======================
 if __name__ == "__main__":
-    # مرحله اول: تشخیص خودکار منطقه زمانی قبل از هر کاری
-    BROKER_TIMEZONE = determine_broker_timezone()
+    
+    # --- بخش جدید: حلقه برای اطمینان از تشخیص منطقه زمانی ---
+    while True:
+        BROKER_TIMEZONE = determine_broker_timezone()
+        
+        # اگر تشخیص منطقه زمانی موفق بود، از حلقه خارج شو
+        if BROKER_TIMEZONE is not None:
+            break
+        
+        # اگر ناموفق بود، ۱۰ ثانیه صبر کرده و دوباره تلاش کن
+        print("Retrying timezone detection in 10 seconds...")
+        time.sleep(10)
 
-    # اگر تشخیص منطقه زمانی ناموفق بود، برنامه را متوقف کن
-    if BROKER_TIMEZONE is None:
-        print("Could not run the script because timezone detection failed.")
-    else:
-        # اگر موفق بود، برنامه اصلی را اجرا کن
+    # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن   
         try:
             main()
         except KeyboardInterrupt:
