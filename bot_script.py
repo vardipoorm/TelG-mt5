@@ -19,7 +19,7 @@ from telegram import Bot
 from datetime import datetime, timedelta # تغییر ضروری: timedelta اضافه شد
 from telegram.ext import Updater, CommandHandler # تغییر ضروری: کتابخانه‌های شنونده اضافه شدند
 
-# تا اینجا منطق و همه چی اوکیه بجز لیست معاملات که پارشیال ها رو هم نشون میده
+# تا اینجا ساختار جدول گزارش خوبه فقط چندتا از شاخص ها باید جابجا بشن
 
 # ====================== ساکت کردن گزارشگرهای پیش‌فرض تلگرام ======================
 # این بخش گزارش‌های خطای شبکه‌ای پیش‌فرض کتابخانه تلگرام و وابستگی‌های آن را غیرفعال می‌کند
@@ -66,9 +66,9 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
-TOKEN = ""
+TOKEN = "" # توکن ربات تلگرام خود را اینجا قرار دهید
 
-CHAT_ID = 
+CHAT_ID = 123456789  # شناسه چت تلگرام خود را اینجا قرار دهید
 
 CHECK_INTERVAL = 5 # فاصله زمانی بین هر چک در حالت عادی
 
@@ -97,10 +97,10 @@ def send_telegram(text):
     except Exception as e:
         # ۲. اگر تلاش اول ناموفق بود، فقط یک بار هشدار ارسال می‌شود
         print(f"!!! Telegram Send Error retrying... (1/{RETRY_COUNT})")#: {e}")
-        try:
-            bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
-        except Exception as e_warn:
-            print(f"⚠️Could not send the warning message: {e_warn}")
+        # try:
+        #     bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
+        # except Exception as e_warn:
+        #     print(f"⚠️Could not send the warning message: {e_warn}")
 
     # ۳. حلقه تلاش‌های مجدد شروع می‌شود (چون تلاش اول ناموفق بود)
     for i in range(1, RETRY_COUNT): 
@@ -111,6 +111,8 @@ def send_telegram(text):
             bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
             return True
         except Exception as e:
+            if i > 10:
+                bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
             print(f"!!! Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})")
 
     # اگر همه تلاش‌ها ناموفق بود
@@ -265,6 +267,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
     account_info = mt5.account_info()
     profit_line = ""
     growth_line = ""
+    Not_available = "" # اگر توی گزارش مقداری نبود این کاراکتر
 
     if account_info:
         # --- محاسبه دقیق سود کل اکانت از ابتدا ---
@@ -288,6 +291,9 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         # --- بخش جدید: محاسبه هوشمند بالانس ابتدای بازه ---
         # چک می‌کنیم که آیا گزارش تا لحظه حال است یا یک گزارش تاریخی است
         # (با یک بازه خطای ۵ ثانیه‌ای)
+        current_balance = ""
+        current_equity = ""
+        historical_end_balance = ""
         if abs((end_time - get_server_time()).total_seconds()) < 5:
             print("Generating real-time report...")
             # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
@@ -295,8 +301,10 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             # --- بخش جدید: گرفتن اطلاعات بالانس و اکوییتی ---
             account_info = mt5.account_info()
             balance_equity_line = f"**موجودی ابتدای بازه:**`{starting_balance_period:,.2f}`\n**موجودی(حال):**`{account_info.balance:>8.2f}`**|اکوییتی(حال):**`{account_info.equity:,.2f}`\n" if account_info else ""
+            current_balance = f"{account_info.balance:,.2f}"
+            current_equity = f"{account_info.equity:,.2f}" if account_info else Not_available
             display_end_time = end_time
-
+            
         else:
             print("Generating historical report...")
             # این یک گزارش تاریخ خاص است، از فرمول پیچیده‌تر استفاده کن
@@ -317,6 +325,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
 
             # --- گرفتن اطلاعات بالانس تاریخی ---
             balance_equity_line = f"**موجودی ابتدای بازه:** `{starting_balance_period:,.2f}`\n**موجودی انتهای بازه:**`{balance_at_period_end:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
+            historical_end_balance = f"{balance_at_period_end:,.2f}" if balance_at_period_end and starting_balance_period else Not_available
             # برای گزارش‌های تاریخی، یک روز از تاریخ پایان کم می‌کنیم تا بازه درست نمایش داده شود
             display_end_time = end_time - timedelta(days=1)    
 
@@ -339,20 +348,108 @@ def generate_and_send_report(update, context, start_time, end_time, title):
 
         growth_line = f"**درصد رشد اکانت(حال):**`{total_growth_str}`|**درصد رشد بازه:**`{period_growth_str}`\n"
         broker_account_line = f"`{account_info.company} | {account_info.login}`\n" if account_info else ""
-
-        summary = (
-            f"**📊 گزارش {title}**\n"
-            f"_{start_time.strftime('%Y/%m/%d')} - {display_end_time.strftime('%Y/%m/%d')}_\n\n"
-            f"{balance_equity_line}"
-            f"{profit_line}"
-            f"{growth_line}"
-            f"کمیسیون بازه:`{commission:.2f}`|سواپ بازه:`{swap:.2f}`\n"
-            f"**وین ریت بازه:**`{win_rate:.2f}%` ({win_count}/{closed_trades_count})\n"
-            f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
-            f"{broker_account_line}"
-            f"-----------------------------------"
+        
+        summary_old = (
+        f"**📊 گزارش {title}**\n"
+        f"_{start_time.strftime('%Y/%m/%d')} - {display_end_time.strftime('%Y/%m/%d')}_\n\n"
+        f"{balance_equity_line}"
+        f"{profit_line}"
+        f"{growth_line}"
+        f"کمیسیون بازه:`{commission:.2f}`|سواپ بازه:`{swap:.2f}`\n"
+        f"**وین ریت بازه:**`{win_rate:.2f}%` ({win_count}/{closed_trades_count})\n"
+        f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
+        f"{broker_account_line}"
+        f"-----------------------------------"
         )
-    
+
+        # داده‌های جدول
+        rows = [
+            ["شاخص", "بازه", "اکنون"],
+            ["موجودی", f"{starting_balance_period:,.2f}", Not_available],
+            ["موجودی پایان", historical_end_balance+current_balance, Not_available],
+            ["اکوئیتی", Not_available, current_equity],# تا اینجا فکر کنم درسته
+            ["سود خالص", f"{total_balance_change_period:,.2f}$", f"{true_total_account_profit:,.2f}$"],
+            ["رشد", f"{period_growth_str}", f"{total_growth_str}"],
+            ["نرخ برد", f"({win_count}/{closed_trades_count})%{win_rate:.2f}", Not_available],
+            ["تعداد معاملات", str(closed_trades_count), Not_available],
+            ["کمیسیون", f"{commission:.2f}", Not_available],
+            ["سواپ", f"{swap:.2f}", Not_available],
+        ]
+
+        # طول بیشترین رشته برای ستون‌های عددی (ستون 2 و 3)
+        col_widths = [
+            max(len(str(row[0])) for row in rows),  # ستون اول فارسی
+            max(len(str(row[1])) for row in rows),  # ستون عددی وسط
+            max(len(str(row[2])) for row in rows)   # ستون عددی آخر
+        ]
+        # col_widths = [max(len(str(row[i])) for row in rows) for i in range(3)]
+
+        # print(col_widths)
+        def format_number(val: str, width: int):
+            if val == Not_available:
+                return val.rjust(width)
+
+            sign = ""
+            suffix = ""
+
+            # گرفتن علامت مثبت/منفی
+            if val.startswith(("+", "-")):
+                sign, val = val[0], val[1:]
+
+            # گرفتن پسوند مثل % یا $
+            if val.endswith("%") or val.endswith("$"):
+                suffix, val = val[-1], val[:-1]
+
+            # بازسازی با علامت چپ و پسوند راست
+            formatted = f"{suffix}{val}{sign}"
+
+            # راست‌چین کردن
+            return formatted.rjust(width)
+                
+        # def format_row(row):
+        #     # ستون اول: بدون padding، ستون 2 و 3 راست‌چین
+        #     return f"`{str(row[0]).ljust(col_widths[0]-1)}|{str(row[1]).rjust(col_widths[1])}|{str(row[2]).rjust(col_widths[2])}`"
+        def format_row(row):
+            col1 = str(row[0]).ljust(col_widths[0]-1)
+            col2 = format_number(str(row[1]), col_widths[1])
+            col3 = format_number(str(row[2]), col_widths[2])
+            return f"`{col1}|{col2}|{col3}`"
+        
+        def make_title_line(title, total_width, sep_char="-"):
+            # طول متن عنوان با فاصله‌های قبل و بعد
+            title_text = f" {title} "
+            title_len = len(title_text)
+
+            # تعداد خط تیره‌های باقی‌مونده
+            dashes = total_width - title_len
+            left = dashes // 2
+            right = dashes - left
+
+            return "`" + (sep_char * left) + title_text + (sep_char * right) + "`"
+
+        # ساخت جدول
+        lines = []
+        total_width = sum(col_widths) + 2  # 6 برای ' | ' بین ستون‌ها
+        lines.append(make_title_line(f"گزارش {title}", total_width, "-"))
+        lines.append(f"`بازه  : ‎{start_time.strftime('%Y/%m/%d')}-{display_end_time.strftime('%Y/%m/%d')}`")
+        lines.append(f"`حساب  : ‎{account_info.company} {account_info.login}`")
+        sep = "`" + "‏-" * total_width + "`"
+        # sep_char = "ـ"  # Tatweel
+        # sep = "`‏-`" * (sum(col_widths) + 0)
+        lines.append(sep)
+        lines.append(format_row(rows[0]))
+        lines.append(sep)
+        for row in rows[1:]:
+            lines.append(format_row(row))
+        lines.append(sep)
+
+        # ارسال به تلگرام بدون monospace
+        summary = "\n".join(lines)
+        # update.message.reply_text(summary)
+
+
+
+    update.message.reply_text(summary_old, parse_mode='Markdown')
     update.message.reply_text(summary, parse_mode='Markdown')
     time.sleep(1) 
 
@@ -997,5 +1094,3 @@ if __name__ == "__main__":
         if mt5.terminal_info():
             mt5.shutdown()
         print("Script exited gracefully.")    
-
-
