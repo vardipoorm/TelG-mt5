@@ -28,6 +28,7 @@ UQDCMQm4IiKfkbK7knZnDiIJ4zqzBkmx7ozJDk1Uk6OQrNHG
 
 *.   از `@BotFather` استفاده کنید و ربات رو درست کنید و توی گوگل سرچ کنید باقیشو من حوصله ندارم. این دستورات رو هم به ربات بدید با دستور `/setcommands`
 ```bash
+custom_report - تاریخ دستی
 time - گزارش 24 ساعت گذشته
 3days - گزارش سه روز گذشته
 7day - گزارش 7 روز گذشته
@@ -40,7 +41,7 @@ lastweek - گزارش هفته ی گذشته
 last2weeks - گزارش دو هفته ی گذشته
 lastmonth - گزارش ماه گذشته
 last2months - گزارش دو ماه گذشته
-last3months - گزارش سه ماه گذشته`
+last3months - گزارش سه ماه گذشته
 ```
 باید این تایید رو دریافت کنید
 ```bash
