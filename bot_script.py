@@ -18,8 +18,8 @@ from dateutil.relativedelta import relativedelta, SA # برای پیدا کرد�
 from telegram import Bot
 from datetime import datetime, timedelta # تغییر ضروری: timedelta اضافه شد
 from telegram.ext import Updater, CommandHandler # تغییر ضروری: کتابخانه‌های شنونده اضافه شدند
-
-# 
+from telegram.ext import ConversationHandler, MessageHandler, Filters # کتابخانه تاریخ دستس
+# اضافه کردن تاریخ خاص
 
 # ====================== ساکت کردن گزارشگرهای پیش‌فرض تلگرام ======================
 # این بخش گزارش‌های خطای شبکه‌ای پیش‌فرض کتابخانه تلگرام و وابستگی‌های آن را غیرفعال می‌کند
@@ -66,9 +66,12 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
-TOKEN = "" # توکن ربات تلگرام خود را اینجا قرار دهید
+TOKEN = "REMOVED"
+#CHAT_ID = REMOVED
+CHAT_ID = REMOVED
 
-CHAT_ID = 123456789  # شناسه چت تلگرام خود را اینجا قرار دهید
+# --- مراحل مکالمه برای گزارش سفارشی ---
+START_DATE, END_DATE = range(2)
 
 CHECK_INTERVAL = 5 # فاصله زمانی بین هر چک در حالت عادی
 
@@ -129,6 +132,54 @@ def handle_error(update, context):
     else:
         # برای خطاهای دیگر، جزئیات را چاپ می‌کنیم تا در صورت نیاز بتوانید آنها را رفع کنید
         print(f"listener unhandled error: {context.error}")
+        
+#-------------------- تابع های گزارش تاریخ دستی ----------------------------------------------    
+def custom_report_start(update, context):
+    """مکالمه را برای دریافت گزارش سفارشی شروع می‌کند."""
+    update.message.reply_text("لطفاً تاریخ شروع را در فرمت YYYY/MM/DD وارد کنید (مثال: 2025/08/01).\nبرای لغو، /cancel را ارسال کنید.")
+    return START_DATE # به مرحله بعدی (دریافت تاریخ شروع) برو
+
+def received_start_date(update, context):
+    """تاریخ شروع را دریافت کرده و منتظر تاریخ پایان می‌ماند."""
+    try:
+        # تاریخ دریافت شده را در حافظه موقت مکالمه ذخیره می‌کنیم
+        naive_start_time = datetime.strptime(update.message.text, '%Y/%m/%d')
+        context.user_data['start_date'] = make_aware(naive_start_time)
+        update.message.reply_text("عالی! حالا لطفاً تاریخ پایان را در همان فرمت وارد کنید.")
+        return END_DATE # به مرحله بعدی (دریافت تاریخ پایان) برو
+    except ValueError:
+        update.message.reply_text("فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید.")
+        return START_DATE # در همین مرحله باقی بمان
+    
+def received_end_date(update, context):
+    """تاریخ پایان را دریافت کرده، گزارش را ساخته و مکالمه را تمام می‌کند."""
+    try:
+        naive_end_date_input = datetime.strptime(update.message.text, '%Y/%m/%d')
+        # برای اینکه معاملات روز پایان را هم شامل شود، آن را به انتهای روز منتقل می‌کنیم
+        naive_end_time = naive_end_date_input.replace(hour=23, minute=59, second=59)
+        end_time = make_aware(naive_end_time)
+        # --- بخش جدید: چک می‌کنیم که تاریخ پایان از تاریخ شروع بزرگتر باشد ---
+        start_time = context.user_data['start_date']
+        if end_time < start_time:
+            update.message.reply_text("خطا: تاریخ پایان نمی‌تواند قبل از تاریخ شروع باشد. لطفاً تاریخ پایان را دوباره وارد کنید یا برای لغو /cancel را ارسال کنید.")
+            return END_DATE # در همین مرحله باقی بمان تا کاربر تاریخ جدید را وارد کند
+        start_time = context.user_data['start_date']
+        
+        # فراخوانی موتور اصلی گزارش‌ساز با تاریخ‌های سفارشی
+        generate_and_send_report(update, context, start_time, end_time, "سفارشی")
+        
+        # پاک کردن حافظه موقت و پایان مکالمه
+        context.user_data.clear()
+        return ConversationHandler.END
+    except ValueError:
+        update.message.reply_text("فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید.")
+        return END_DATE # در همین مرحله باقی بمان
+    
+def cancel_conversation(update, context):
+    """مکالمه را لغو می‌کند."""
+    update.message.reply_text("عملیات گزارش‌گیری سفارشی لغو شد.")
+    context.user_data.clear()
+    return ConversationHandler.END 
 
 # ====================== بخش وب‌سرور برای دریافت هشدارها ======================
 app = Flask(__name__)
@@ -294,7 +345,19 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         current_balance = ""
         current_equity = ""
         historical_end_balance = ""
-        if abs((end_time - get_server_time()).total_seconds()) < 5:
+        
+        # --- بخش جدید: تشخیص هوشمند نوع گزارش (لحظه‌ای یا تاریخی) ---
+        is_live_report = False # پیش‌فرض را روی تاریخی می‌گذاریم
+
+        # شرط اول: آیا اختلاف زمانی بسیار کم است؟ (برای گزارش‌های روزانه)
+        if abs((end_time - get_server_time()).total_seconds()) < 10:
+            is_live_report = True
+        # شرط دوم: آیا تاریخ پایان گزارش، همان تاریخ امروز است؟ (برای تاریخ دستی)
+        elif end_time.date() == get_server_time().date():
+            is_live_report = True
+
+        # حالا بر اساس نتیجه، بالانس ابتدای بازه را محاسبه می‌کنیم
+        if is_live_report:
             print("Generating real-time report...")
             # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
             starting_balance_period = account_info.balance - total_balance_change_period
@@ -326,8 +389,14 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             # --- گرفتن اطلاعات بالانس تاریخی ---
             balance_equity_line = f"**موجودی ابتدای بازه:** `{starting_balance_period:,.2f}`\n**موجودی انتهای بازه:**`{balance_at_period_end:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
             historical_end_balance = f"{balance_at_period_end:,.2f}" if balance_at_period_end and starting_balance_period else Not_available
+            # این شرط تضمین می‌کند که یک روز از تاریخ پایان فقط و فقط زمانی کم شود که گزارش شما یک گزارش تاریخی باشد و زمان پایان آن دقیقاً ساعت ۰۰:۰۰ بامداد باشد.
+            # این کار باعث می‌شود که گزارش سفارشی شما (که زمان پایان آن ۲۳:۵۹ است) به درستی و بدون تغییر نمایش داده شود.
+            if end_time.time() == datetime.min.time():
+                display_end_time = end_time - timedelta(days=1)
+            else:
+                display_end_time = end_time
             # برای گزارش‌های تاریخی، یک روز از تاریخ پایان کم می‌کنیم تا بازه درست نمایش داده شود
-            display_end_time = end_time - timedelta(days=1)    
+            # display_end_time = end_time - timedelta(days=1)    
 
         profit_line = f"**سود اکانت(حال):**`{true_total_account_profit:>8.2f}$`|**سود بازه:** `{total_balance_change_period:,.2f}$`\n"
 
@@ -873,6 +942,17 @@ def main():
             global updater
             updater = Updater(TOKEN, use_context=True)
             dispatcher = updater.dispatcher
+            # --- بخش جدید: ساخت و ثبت مکالمه برای گزارش سفارشی ---
+            conv_handler = ConversationHandler(
+                entry_points=[CommandHandler('custom_report', custom_report_start)],
+                states={
+                    START_DATE: [MessageHandler(Filters.text & ~Filters.command, received_start_date)],
+                    END_DATE: [MessageHandler(Filters.text & ~Filters.command, received_end_date)],
+                },
+                fallbacks=[CommandHandler('cancel', cancel_conversation)],
+            )
+            
+            dispatcher.add_handler(conv_handler)
             dispatcher.add_handler(CommandHandler("time", _24H_report))
             dispatcher.add_handler(CommandHandler("3days", _3days_report))
             dispatcher.add_handler(CommandHandler("7day", _7day_report))
@@ -1094,3 +1174,5 @@ if __name__ == "__main__":
         if mt5.terminal_info():
             mt5.shutdown()
         print("Script exited gracefully.")    
+
+
