@@ -66,9 +66,9 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
-TOKEN = "REMOVED"
-#CHAT_ID = REMOVED
-CHAT_ID = REMOVED
+TOKEN = ""
+
+CHAT_ID = 
 
 # --- مراحل مکالمه برای گزارش سفارشی ---
 START_DATE, END_DATE = range(2)
