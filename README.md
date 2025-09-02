@@ -66,7 +66,7 @@ Success! Command list updated. /help
 ```bash
 pip install pip-review
 pip-review --auto
-pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask
+pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask colorlog
 
 ```
 ### قدم سوم: تنظیمات اسکریپت
@@ -80,6 +80,9 @@ pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
  **نحوه پیدا کردن مسیر:** روی شورتکات متاتریدر راست کلیک کرده، `Properties` را انتخاب و متن داخل فیلد `Target` را کپی کنید. (توجه: در پایتون از دو بک‌اسلش `\\` استفاده کنید).
  مثال: `***REMOVED***" "`
 
+## حالا به متاتریدر بروید و توی تنظیمات این تیک رو بزنید.
+
+<img width="622" height="402" alt="image" src="https://github.com/user-attachments/assets/4cec7ca0-9387-4d84-8e45-ae4106470088" />
 
 ## اجرای اسکریپت
 
@@ -96,6 +99,12 @@ run python mt5-telegram.bat
 
 ## نصب اکسپرت برای دریافت آلرت
 اکسپرت موجود در پوشه را در متاتریدر خود نصب کنید(نحوه ی نصب گوگل شود)
+
+این آدرس را استثنا کنیددر تنظیمات متاتریدر و تیک ها رو هم طبق تصویر درست کنید
+```http://127.0.0.1:5000```
+
+<img width="622" height="402" alt="image" src="https://github.com/user-attachments/assets/a643e93a-aa28-4cab-93a6-b5fd16c5e038" />
+
 
 ## نحوه استفاده
 
