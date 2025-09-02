@@ -9,3 +9,4 @@ scipy
 arabic_reshaper
 python-bidi
 flask
+colorlog
