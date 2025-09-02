@@ -1,6 +1,7 @@
 import MetaTrader5 as mt5
 import time
 import logging
+import colorlog
 import pytz
 from flask import Flask, request
 import threading
@@ -18,13 +19,41 @@ from dateutil.relativedelta import relativedelta, SA # برای پیدا کرد�
 from telegram import Bot
 from datetime import datetime, timedelta # تغییر ضروری: timedelta اضافه شد
 from telegram.ext import Updater, CommandHandler # تغییر ضروری: کتابخانه‌های شنونده اضافه شدند
-from telegram.ext import ConversationHandler, MessageHandler, Filters # کتابخانه تاریخ دستس
-# اضافه کردن تاریخ خاص
+from telegram.ext import ConversationHandler, MessageHandler, Filters # کتابخانه تاریخ دستی
+# این کد تا قبل از تغییر محاسبه سود بازه برای واریز و برداشت ها اوکیه
 
 # ====================== ساکت کردن گزارشگرهای پیش‌فرض تلگرام ======================
 # این بخش گزارش‌های خطای شبکه‌ای پیش‌فرض کتابخانه تلگرام و وابستگی‌های آن را غیرفعال می‌کند
 # تا فقط مدیر خطای شخصی ما (handle_error) پیام‌ها را چاپ کند.
-logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
+# ====== تنظیمات لاگ رنگی و پیشرفته ======
+# تعریف کدهای رنگی ANSI برای تاریخ
+ORANGE = '\033[33m'
+RESET = '\033[0m'
+
+# ۱. گرفتن گزارشگر اصلی
+log = logging.getLogger()
+log.setLevel(logging.INFO)
+
+# ۲. ساخت یک فرمت‌دهنده رنگی
+# %(log_color)s: رنگ را بر اساس سطح خطا تنظیم می‌کند
+# ما تاریخ را به صورت دستی با کدهای ANSI رنگی می‌کنیم
+formatter = colorlog.ColoredFormatter(
+    f'{ORANGE}%(asctime)s{RESET}%(log_color)s[%(levelname)s]{RESET}%(message)s',
+    log_colors={
+        'DEBUG':    'cyan',
+        'INFO':     'green',
+        'WARNING':  'yellow',
+        'ERROR':    'red',
+        'CRITICAL': 'bold_red',
+    }
+)
+
+# ۳. ساخت یک کنترل‌کننده و اعمال فرمت‌دهنده روی آن
+handler = colorlog.StreamHandler()
+handler.setFormatter(formatter)
+
+# ۴. اضافه کردن کنترل‌کننده به گزارشگر اصلی
+log.addHandler(handler)
 logging.getLogger('telegram.vendor.ptb_urllib3.urllib3.connectionpool').setLevel(logging.CRITICAL)
 logging.getLogger('telegram.ext.updater').setLevel(logging.CRITICAL)
 
@@ -33,36 +62,36 @@ def determine_broker_timezone():
     """
     اختلاف زمانی سرور بروکر با UTC را محاسبه کرده و رشته منطقه زمانی صحیح را برمی‌گرداند.
     """
-    print("Determining broker timezone...")
+    logging.info("Determining broker timezone...")
     if not mt5.initialize(path=MT5_PATH):
-        print("Could not connect to MT5 to determine timezone.")
+        logging.error("Could not connect to MT5 to determine timezone.")
         return None
 
     server_tick = mt5.symbol_info_tick("BTCUSD")
     if not server_tick or server_tick.time == 0:
-        print("Could not get server time from tick.")
+        logging.error("Could not get server time from tick.")
         # mt5.shutdown()
         return None
     
     # زمان سرور و زمان جهانی را به صورت "آگاه از منطقه زمانی" ایجاد می‌کنیم
     server_time = datetime.fromtimestamp(server_tick.time, tz=pytz.utc)
-    # print(f"Server time (UTC): {server_time}")
+    # logging.info(f"Server time (UTC): {server_time}")
     utc_now = datetime.now(pytz.utc)
-    # print(f"Current UTC time: {utc_now}")
+    # logging.info(f"Current UTC time: {utc_now}")
 
     # اختلاف را به ساعت گرد می‌کنیم
     time_difference_hours = (server_time - utc_now).total_seconds() / 3600.0
-    # print(f"Detected timezone difference (hours): {time_difference_hours}")
+    # logging.info(f"Detected timezone difference (hours): {time_difference_hours}")
     offset = round(time_difference_hours) # به نزدیک‌ترین ساعت کامل گرد می‌کنیم
     
-    # print(f"Detected timezone offset: UTC{offset:+}")
+    # logging.info(f"Detected timezone offset: UTC{offset:+}")
 
     # ساخت رشته صحیح Etc/GMT (علامت برعکس است)
     offset_sign = "+" if offset <= 0 else "-"
     # timezone_str = f"Etc/GMT{offset_sign}{abs(offset)}"
     timezone_str = "Etc/GMT+0"
     # mt5.shutdown()
-    print(f"Timezone automatically set to: {timezone_str}")
+    logging.info(f"Timezone: {timezone_str}")
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
@@ -99,16 +128,16 @@ def send_telegram(text):
 
     except Exception as e:
         # ۲. اگر تلاش اول ناموفق بود، فقط یک بار هشدار ارسال می‌شود
-        print(f"!!! Telegram Send Error retrying... (1/{RETRY_COUNT})")#: {e}")
+        logging.error(f"Telegram Send Error retrying... (1/{RETRY_COUNT})")#: {e}")
         # try:
         #     bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
         # except Exception as e_warn:
-        #     print(f"⚠️Could not send the warning message: {e_warn}")
+        #     logging.error(f"⚠️Could not send the warning message: {e_warn}")
 
     # ۳. حلقه تلاش‌های مجدد شروع می‌شود (چون تلاش اول ناموفق بود)
     for i in range(1, RETRY_COUNT): 
         time.sleep(RETRY_DELAY)
-        #print(f"!!! Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})")
+        #logging.error(f"Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})")
         try:
             # تلاش برای ارسال پیام اصلی
             bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
@@ -116,10 +145,10 @@ def send_telegram(text):
         except Exception as e:
             if i > 10:
                 bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
-            print(f"!!! Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})")
+            logging.error(f"Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})")#: {e}")
 
     # اگر همه تلاش‌ها ناموفق بود
-    print("❌Could not send message to Telegram after all retries.")
+    logging.critical("❌Could not send message to Telegram after all retries.")
     #send_telegram("❌ Failed to send a message after multiple retries.")
     bot.send_message(chat_id=CHAT_ID, text="❌ Failed to send a message after multiple retries.", parse_mode='Markdown')
     return False
@@ -128,11 +157,11 @@ def handle_error(update, context):
     """خطاهای مربوط به شنونده تلگرام را مدیریت کرده و یک پیام ساده چاپ می‌کند."""
     # ما فقط برای خطاهای مربوط به شبکه پیام ساده چاپ می‌کنیم تا خطاهای مهم دیگر پنهان نشوند
     if "urllib3 HTTPError" in str(context.error) or "SSLEOFError" in str(context.error):
-        print("Network error occurred while listening for updates...")
+        logging.error("Listener Network error")
     else:
         # برای خطاهای دیگر، جزئیات را چاپ می‌کنیم تا در صورت نیاز بتوانید آنها را رفع کنید
-        print(f"listener unhandled error: {context.error}")
-        
+        logging.critical(f"listener unhandled error: {context.error}")
+
 #-------------------- تابع های گزارش تاریخ دستی ----------------------------------------------    
 def custom_report_start(update, context):
     """مکالمه را برای دریافت گزارش سفارشی شروع می‌کند."""
@@ -190,18 +219,27 @@ def handle_alert():
     alert_message = request.data.decode('utf-8')
     
     # چاپ پیام در کنسول برای اطمینان از دریافت
-    print(f"Received alert from MT5: {alert_message}")
-    
+    # logging.info(f"{alert_message}")
+
     # ارسال پیام به تلگرام
     # ما این کار را در یک ترد جداگانه انجام می‌دهیم تا سرور بلافاصله پاسخ دهد
-    threading.Thread(target=send_telegram, args=(alert_message,)).start()
-    
+    threading.Thread(target=send_alert_and_log, args=(alert_message,)).start()
+
     return "OK", 200
 
 def run_flask_server():
+    # --- این دو خط، لاگ پیش‌فرض وب‌سرور را غیرفعال می‌کنند ---
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
     """این تابع وب‌سرور را راه‌اندازی می‌کند."""
     # پارامتر use_reloader=False برای جلوگیری از خطا در تردها ضروری است
     app.run(host='127.0.0.1', port=5000, use_reloader=False)
+
+def send_alert_and_log(message):
+    """پیام هشدار را به تلگرام ارسال کرده و نتیجه را در یک خط در کنسول چاپ می‌کند."""
+    success = send_telegram(message)
+    status = "(Send ok)" if success else f"(Send error)"
+    logging.info(f"{message.strip()}{status}")
 
 # ====================== توابع گزارش‌گیری ======================
 def generate_and_send_report(update, context, start_time, end_time, title):
@@ -229,7 +267,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
     commission = 0.0
     swap = 0.0
     positions = {}
-    # این حلقه برای گرفتم معاملات کل تاریخچه از 5 سال گذشته تا الان هست بجز اون شرط زمان که داخلش هست
+    # این حلقه برای گرفتن معاملات کل تاریخچه از 5 سال گذشته تا الان هست بجز اون شرط زمان که داخلش هست
     for deal in deals:
         # --- این خط را اضافه کنید تا تراکنش‌های غیرمعاملاتی نادیده گرفته شوند ---
         if deal.position_id == 0:
@@ -282,7 +320,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         if is_closed and pos_data['close_time'] > 0:
             # زمان را به صورت آگاه از منطقه زمانی (UTC) ایجاد می‌کنیم
             close_datetime = datetime.fromtimestamp(pos_data['close_time'], tz=pytz.utc)
-            # print("position id: ", pos_id," close time: ", close_datetime)
+            # logging.info("position id: ", pos_id," close time: ", close_datetime)
             # شرط ۲: زمان بسته شدن پوزیشن باید در بازه گزارش اصلی باشد
             if start_time <= close_datetime <= end_time:
                 final_positions[pos_id] = pos_data
@@ -358,7 +396,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
 
         # حالا بر اساس نتیجه، بالانس ابتدای بازه را محاسبه می‌کنیم
         if is_live_report:
-            print("Generating real-time report...")
+            logging.info("Generating real-time report...")
             # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
             starting_balance_period = account_info.balance - total_balance_change_period
             # --- بخش جدید: گرفتن اطلاعات بالانس و اکوییتی ---
@@ -369,7 +407,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             display_end_time = end_time
             
         else:
-            print("Generating historical report...")
+            logging.info("Generating historical report...")
             # این یک گزارش تاریخ خاص است، از فرمول پیچیده‌تر استفاده کن
             # ابتدا سود معاملاتی که بعد از بازه گزارش انجام شده را پیدا می‌کنیم
             deals_after_period = mt5.history_deals_get(end_time, get_server_time())
@@ -378,11 +416,11 @@ def generate_and_send_report(update, context, start_time, end_time, title):
                 for d in deals_after_period:
                     if d.entry in (mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT):
                         profit_after_period += d.profit + d.commission + d.swap
-            # print(f"Profit from deals after the period: {profit_after_period}")
+            # logging.info(f"Profit from deals after the period: {profit_after_period}")
             # بالانس در انتهای بازه = بالانس فعلی - سود معاملات بعدی
             balance_at_period_end = account_info.balance - profit_after_period
-            # print(f"Current balance: {account_info.balance}")
-            # print(f"Balance at period end: {balance_at_period_end}")
+            # logging.info(f"Current balance: {account_info.balance}")
+            # logging.info(f"Balance at period end: {balance_at_period_end}")
             # بالانس ابتدای بازه = بالانس انتهای بازه - سود خود بازه
             starting_balance_period = balance_at_period_end - total_balance_change_period
 
@@ -453,7 +491,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         ]
         # col_widths = [max(len(str(row[i])) for row in rows) for i in range(3)]
 
-        # print(col_widths)
+        # logging.info(col_widths)
         def format_number(val: str, width: int):
             if val == Not_available:
                 return val.rjust(width)
@@ -542,7 +580,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
 # ====================== رسم نمودار رشد ======================
 def create_and_send_growth_chart(update, context, fully_closed_positions, starting_balance, title):
     """نمودار رشد حساب را ساخته و به تلگرام ارسال می‌کند."""
-    print("Creating growth chart...")
+    logging.info("Creating growth chart...")
     
     # # ۱. آماده‌سازی داده‌ها
     # dates = []
@@ -553,7 +591,7 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     closed_deals = fully_closed_positions#sorted([d for d in fully_closed_positions if d.entry == mt5.DEAL_ENTRY_OUT], key=lambda x: x.time)
 
     # if not sorted_deals:
-    #     print("No closing deals to chart.")
+    #     logging.warning("No closing deals to chart.")
     #     return
 
     # # اضافه کردن نقطه شروع نمودار
@@ -572,7 +610,7 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     current_equity = starting_balance
 
     if not closed_deals:
-        print("No closing deals to chart.")
+        logging.warning("No closing deals to chart.")
         update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
         return
 
@@ -583,13 +621,13 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     # محاسبه سود تجمعی برای هر معامله
     for i, position_data in enumerate(closed_deals):
         # --- این خط را برای دیباگ اضافه کنید ---
-        # print(f"Trade #{i+1}: current_equity_before={current_equity}, profit_to_add={position_data['profit']}")
+        # logging.info(f"Trade #{i+1}: current_equity_before={current_equity}, profit_to_add={position_data['profit']}")
         current_equity += position_data['profit']# + position_data['commission'] + position_data['swap']
         trade_numbers.append(i + 1) # شماره معامله (۱، ۲، ۳، ...)
         cumulative_profit.append(current_equity)
     # --- این شرط حیاتی را اضافه کنید ---
     if len(trade_numbers) < 4:
-        print("Not enough data to create a chart.")
+        logging.warning("Not enough data to create a chart.")
         update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
         # در صورت تمایل می‌توانید یک پیام مناسب به کاربر تلگرام بفرستید
         # update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
@@ -663,14 +701,14 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     buf.seek(0)
     
     # ۴. ارسال تصویر به تلگرام
-    print("Sending chart to Telegram...")
+    logging.info("Sending chart to Telegram...")
     update.message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
     
     # بستن نمودار برای آزاد کردن حافظه
     plt.close()
     buf.close()
-    print("RAM freed.")
-    print("Monitoring continue...")
+    logging.info("RAM freed.")
+    logging.info("Monitoring continue...")
 # ============================================== گزارش روزانه ===========================================================
 def _24H_report(update, context):
     update.message.reply_text("در حال تهیه گزارش 24 ساعته گذشته...")
@@ -753,7 +791,7 @@ def today_report(update, context):
     naive_start_time = datetime.combine(server_now.date(), datetime.min.time())
     start_time = make_aware(naive_start_time)
     end_time = server_now
-    # print(f"Start time: {start_time}, End time: {end_time}")
+    # logging.info(f"Start time: {start_time}, End time: {end_time}")
     generate_and_send_report(update, context, start_time, end_time, "امروز")
     
 def last_week_report(update, context):
@@ -933,8 +971,8 @@ def main():
     # --- تغییر کلیدی: راه‌اندازی وب‌سرور در یک ترد پس‌زمینه ---
     flask_thread = threading.Thread(target=run_flask_server, daemon=True)
     flask_thread.start()
-    print("Alert server is running in the background...")
-    
+    logging.info("Alert Server is running.")
+
         # این حلقه تا زمانی که اینترنت آماده شود، ادامه دارد
     while True:
         # تلاش برای راه‌اندازی شنونده تلگرام
@@ -969,13 +1007,13 @@ def main():
             dispatcher.add_error_handler(handle_error)      
             # اگر همه چیز موفق بود، از حلقه راه‌اندازی خارج می‌شویم
             updater.start_polling()# راه اندازی شنونده
-            print("Bot is listening for commands in the background...")
-            #print("Telegram connection successful. Starting main operations.")
+            logging.info("Listener started successfully.")
+            #logging.info("Telegram connection successful. Starting main operations.")
             break
 
         except Exception as e:
             # اگر اینترنت وصل نبود، خطا را چاپ کرده و حلقه را تکرار می‌کنیم
-            print(f"--initial listener run fail Retrying in 10 seconds...")
+            logging.error(f"--initial listener run fail Retrying in 10 seconds...")
             time.sleep(10)
             continue
     
@@ -1071,7 +1109,7 @@ def main():
                 time.sleep(CHECK_INTERVAL)
 
             except Exception as e:
-                print(f"Connection to MT5 lost during monitoring: {e}")
+                logging.critical(f"Connection to MT5 lost: {e}")
                 send_telegram("⚠️ Connection to MT5 lost. Attempting to reconnect...")
                 is_connected = False
                 disconnect_time = time.time()
@@ -1080,20 +1118,19 @@ def main():
                 continue
         else:
             # --- حالت قطع شده: تلاش برای اتصال مجدد ---
-            print("Attempting to connect to MetaTrader 5...")
-            
+            logging.info("Connecting to MetaTrader 5...")
+
             if disconnect_time and (time.time() - disconnect_time > OVERALL_TIMEOUT):
-                print(f"Could not reconnect within {int(OVERALL_TIMEOUT/60)} minutes. Shutting down for good.")
+                logging.error(f"Could not reconnect within {int(OVERALL_TIMEOUT/60)} minutes. Shutting down for good.")
                 send_telegram(f"❌ Could not reconnect to MT5 for {int(OVERALL_TIMEOUT/60)} minutes. Bot is shutting down.")
                 break 
 
             if mt5.initialize(path=MT5_PATH):
                 if disconnect_time:
-                    print("Reconnected to MT5 successfully!")
+                    logging.info("Reconnected to MT5 successfully!")
                     send_telegram("✅ Reconnected to MT5. Monitoring resumed.")
                 else: # در غیر این صورت این اولین اتصال است
-                    print("connected to MT5 successfully!")
-                    print("Monitoring...")
+                    logging.info("Connected to MT5 successfully!")
                     send_telegram("✅ *Bot is running*\nMonitoring...")
 
                 is_connected = True
@@ -1104,11 +1141,11 @@ def main():
                 # این بخش دیگر ضروری نیست چون ما تاریخچه را چک می‌کنیم نه پوزیشن‌های باز را
                 positions_result = mt5.positions_get()
                 last_known_positions = {p.ticket: p for p in positions_result} if positions_result else {}
-                # print(f"Ignoring {len(last_known_positions)} existing position(s).")
+                # logging.info(f"Ignoring {len(last_known_positions)} existing position(s).")
                 # send_telegram(f"{len(last_known_positions)} existing position(s).")
                 # --- بخش جدید: ساخت و ارسال لیست پوزیشن‌های باز ---
-                print(f"Ignoring {len(last_known_positions)} existing position(s).")
-
+                logging.info(f"Ignoring {len(last_known_positions)} existing position(s).")
+                logging.info("Monitoring...")
                 # اگر پوزیشنی باز بود، لیست آنها را تهیه و ارسال کن
                 if last_known_positions:
                     position_lines = []
@@ -1134,11 +1171,11 @@ def main():
                     # اگر هیچ پوزیشنی باز نبود، فقط یک پیام ساده بفرست
                     send_telegram("0 existing position(s).")
             else:
-                print(f"Connection failed. Retrying in {RECONNECT_DELAY} seconds...")
+                logging.error(f"Connection failed. Retrying in {RECONNECT_DELAY} seconds...")
                 time.sleep(RECONNECT_DELAY)
                 #mt5.initialize(path=MT5_PATH)#فقط به خاطر اینکه متاتریدر اگه اجرا نبود اجرا بشه
-    
-    print("Script has been shut down.")
+
+    logging.info("Script has been shut down.")
     updater.stop()
     
 # ====================== اجرای اسکریپت ======================
@@ -1153,7 +1190,7 @@ if __name__ == "__main__":
             break
         
         # اگر ناموفق بود، ۱۰ ثانیه صبر کرده و دوباره تلاش کن
-        print("Retrying timezone detection in 10 seconds...")
+        logging.info("Retrying timezone detection in 10 seconds...")
         time.sleep(10)
 
     # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن           
@@ -1161,18 +1198,18 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         send_telegram("ℹ️ *Script Stopped Manually*")
-        print("\nScript stopped by user.")
+        logging.info("Script stopped by user.")
     except Exception as e:
         send_telegram(f"❌ *CRITICAL ERROR*\nBot has crashed!\nError: {e}")
-        print(f"Critical Error: {e}")
+        logging.critical(f"Critical Error: {e}")
     finally:
         if updater and updater.running:
             # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
-            print("{please wait}Stopping the bot updater...")
+            logging.info("{please wait}Stopping the bot updater...")
             updater.stop()
-            print("Updater stopped.")
+            logging.info("Updater stopped.")
         if mt5.terminal_info():
             mt5.shutdown()
-        print("Script exited gracefully.")    
+        logging.info("Script exited gracefully.")
 
 
