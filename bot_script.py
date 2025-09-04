@@ -157,7 +157,7 @@ def handle_error(update, context):
     """خطاهای مربوط به شنونده تلگرام را مدیریت کرده و یک پیام ساده چاپ می‌کند."""
     # ما فقط برای خطاهای مربوط به شبکه پیام ساده چاپ می‌کنیم تا خطاهای مهم دیگر پنهان نشوند
     if "urllib3 HTTPError" in str(context.error) or "SSLEOFError" in str(context.error):
-        logging.error("Listener Network error")
+        logging.warning("Listener Network error")
     else:
         # برای خطاهای دیگر، جزئیات را چاپ می‌کنیم تا در صورت نیاز بتوانید آنها را رفع کنید
         logging.critical(f"listener unhandled error: {context.error}")
