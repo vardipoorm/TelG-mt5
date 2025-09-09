@@ -115,6 +115,8 @@ RETRY_DELAY = 2
 # --- مسیر متاتریدر خاص ---
 MT5_PATH = "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
 BROKER_TIMEZONE = None
+# --- آستانه برای محاسبه وین ریت واقعی ---
+WINRATE_THRESHOLD_PERCENT = 0.05 # 0.05% of starting balance
 
 # ====================== اتصال به تلگرام ======================
 bot = Bot(token=TOKEN)
@@ -238,8 +240,13 @@ def run_flask_server():
 def send_alert_and_log(message):
     """پیام هشدار را به تلگرام ارسال کرده و نتیجه را در یک خط در کنسول چاپ می‌کند."""
     success = send_telegram(message)
-    status = "(Send ok)" if success else f"(Send error)"
-    logging.info(f"{message.strip()}{status}")
+    if success:
+        logging.info(f"(Send payload ok)")
+    else:
+        logging.error(f"(Send payload error)")
+    # status = "(Send payload ok)" if success else f"(Send payload error)"
+    # logging.info(f"{message.strip()}{status}")
+    # logging.info(f"{status}")
 
 # ====================== توابع گزارش‌گیری ======================
 def generate_and_send_report(update, context, start_time, end_time, title):
@@ -261,7 +268,18 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         return
 
     report_lines, total_profit, closed_trades_count, win_count = [], 0.0, 0, 0
-    # --- این خط جدید را اضافه کنید ---
+    # متغیرهای جدید برای آمار سود و ضرر
+    max_profit = 0.0
+    max_loss = 0.0
+    total_profit_sum = 0.0
+    total_loss_sum = 0.0
+    profit_trades_count = 0
+    loss_trades_count = 0
+    actual_date_report = ""
+    
+    real_win_count = 0
+    real_loss_count = 0
+    breakeven_count = 0
     total_balance_change_period = 0.0 
     trade_counter = 1
     commission = 0.0
@@ -325,9 +343,24 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             if start_time <= close_datetime <= end_time:
                 final_positions[pos_id] = pos_data
     # --- پایان بخش جدید ---
-    
+    active_trading_days_set = set()
     # مرتب‌سازی پوزیشن‌ها بر اساس زمان بسته شدن برای نمایش به ترتیب
     sorted_positions = sorted(final_positions.items(), key=lambda item: item[1]['close_time'])
+
+    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+    # این بلوک کد را برای پیدا کردن تاریخ اولین ترید اضافه کنید
+    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+    first_trade_date_str = "---" # مقدار پیش‌فرض
+    if sorted_positions:
+        # زمان اولین پوزیشن بسته شده در بازه را می‌گیریم
+        first_trade_timestamp = sorted_positions[0][1]['close_time']
+        first_trade_dt_utc = datetime.fromtimestamp(first_trade_timestamp, tz=pytz.utc)
+
+        # به منطقه زمانی بروکر تبدیل می‌کنیم
+        broker_tz = pytz.timezone(BROKER_TIMEZONE)
+        first_trade_dt_broker = first_trade_dt_utc.astimezone(broker_tz)
+        first_trade_date_str = first_trade_dt_broker.strftime('%Y/%m/%d')
+    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
     for position_id, pos_data in sorted_positions:
         # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
@@ -336,14 +369,32 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             broker_tz = pytz.timezone(BROKER_TIMEZONE)
             broker_dt_object = utc_time.astimezone(broker_tz)
             trade_date = broker_dt_object.strftime('%y/%m/%d %H:%M:%S')
-            # --- شمارنده‌های جدید برای وین ریت صحیح ---
+            active_trading_days_set.add(broker_dt_object.date())
+  
+            # شمارنده وین ریت قدیمی همچنان برای مقایسه محاسبه می‌شود
             closed_trades_count += 1
+            # ... کد قبلی شما
             if pos_data['profit'] >= 0:
                 win_count += 1
+                profit_trades_count += 1
+                total_profit_sum += pos_data['profit']
+                if pos_data['profit'] > max_profit:
+                    max_profit = pos_data['profit']
+            else: # اگر معامله با ضرر بسته شده بود
+                loss_trades_count += 1
+                total_loss_sum += pos_data['profit'] # ضررها منفی هستند،そのままجمع می‌کنیم
+                if pos_data['profit'] < max_loss:
+                    max_loss = pos_data['profit']
+
             line = f"{trade_counter:02d}-{pos_data['symbol']}|{pos_data['trade_volume']:.2f}|{pos_data['profit']:>8,.2f}|{trade_date}"
+            # line = f"{trade_counter:02d}-{pos_data['symbol']}|{pos_data['trade_volume']:.2f}|{pos_data['profit']:>8,.2f}|{trade_date}"
             report_lines.append(f"`{line}`")
             trade_counter += 1
     # --- پایان بخش جدید ---
+    
+    avg_profit = total_profit_sum / profit_trades_count if profit_trades_count > 0 else 0.0
+    avg_loss = total_loss_sum / loss_trades_count if loss_trades_count > 0 else 0.0
+    
         
     if not report_lines:
         update.message.reply_text(f"در بازه زمانی گزارش ({title}) هیچ پوزیشنی بسته نشده است.")
@@ -399,9 +450,25 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             logging.info("Generating real-time report...")
             # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
             starting_balance_period = account_info.balance - total_balance_change_period
+            actual_trading_days_count = len(active_trading_days_set)
+            actual_date_report = f"اولین ترید(روز معاملاتی): ‎{first_trade_date_str}‏ ({str(actual_trading_days_count)})\n" if actual_trading_days_count > 1 else ""
+            
+            for position_id, pos_data in sorted_positions:
+                # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
+                if abs(pos_data['volume']) < 0.01 and pos_data['close_time'] > 0:
+                    # --- بخش جدید: محاسبه هوشمند برد، باخت و سر به سر ---
+                    threshold_amount = starting_balance_period * (WINRATE_THRESHOLD_PERCENT / 100.0)
+                    
+                    if pos_data['profit'] > threshold_amount:
+                        real_win_count += 1
+                    elif pos_data['profit'] < -threshold_amount:
+                        real_loss_count += 1
+                    else:
+                        breakeven_count += 1
+        
             # --- بخش جدید: گرفتن اطلاعات بالانس و اکوییتی ---
             account_info = mt5.account_info()
-            balance_equity_line = f"**موجودی ابتدای بازه:**`{starting_balance_period:,.2f}`\n**موجودی(حال):**`{account_info.balance:>8.2f}`**|اکوییتی(حال):**`{account_info.equity:,.2f}`\n" if account_info else ""
+            balance_equity_line = f"**موجودی ابتدای بازه:**`‎{starting_balance_period:,.2f}`‏\n**موجودی(حال):**‎`{account_info.balance:>8.2f}`**|اکوییتی(حال):**`{account_info.equity:,.2f}`\n" if account_info else ""
             current_balance = f"{account_info.balance:,.2f}"
             current_equity = f"{account_info.equity:,.2f}" if account_info else Not_available
             display_end_time = end_time
@@ -424,8 +491,21 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             # بالانس ابتدای بازه = بالانس انتهای بازه - سود خود بازه
             starting_balance_period = balance_at_period_end - total_balance_change_period
 
+            for position_id, pos_data in sorted_positions:
+                # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
+                if abs(pos_data['volume']) < 0.01 and pos_data['close_time'] > 0:
+                    # --- بخش جدید: محاسبه هوشمند برد، باخت و سر به سر ---
+                    threshold_amount = starting_balance_period * (WINRATE_THRESHOLD_PERCENT / 100.0)
+                    
+                    if pos_data['profit'] > threshold_amount:
+                        real_win_count += 1
+                    elif pos_data['profit'] < -threshold_amount:
+                        real_loss_count += 1
+                    else:
+                        breakeven_count += 1
+
             # --- گرفتن اطلاعات بالانس تاریخی ---
-            balance_equity_line = f"**موجودی ابتدای بازه:** `{starting_balance_period:,.2f}`\n**موجودی انتهای بازه:**`{balance_at_period_end:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
+            balance_equity_line = f"**موجودی ابتدای بازه:** `‎{starting_balance_period:,.2f}‏`\n**موجودی انتهای بازه:**`‎{balance_at_period_end:,.2f}`\n" if balance_at_period_end and starting_balance_period else ""
             historical_end_balance = f"{balance_at_period_end:,.2f}" if balance_at_period_end and starting_balance_period else Not_available
             # این شرط تضمین می‌کند که یک روز از تاریخ پایان فقط و فقط زمانی کم شود که گزارش شما یک گزارش تاریخی باشد و زمان پایان آن دقیقاً ساعت ۰۰:۰۰ بامداد باشد.
             # این کار باعث می‌شود که گزارش سفارشی شما (که زمان پایان آن ۲۳:۵۹ است) به درستی و بدون تغییر نمایش داده شود.
@@ -436,7 +516,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             # برای گزارش‌های تاریخی، یک روز از تاریخ پایان کم می‌کنیم تا بازه درست نمایش داده شود
             # display_end_time = end_time - timedelta(days=1)    
 
-        profit_line = f"**سود اکانت(حال):**`{true_total_account_profit:>8.2f}$`|**سود بازه:** `{total_balance_change_period:,.2f}$`\n"
+        profit_line = f"**سود اکانت(حال):**‎`{true_total_account_profit:>8.2f}$`‏|**سود بازه:** ‎`{total_balance_change_period:,.2f}$`\n"
 
         # --- محاسبه درصد رشد کل اکانت ---
         initial_deposit = account_info.balance - true_total_account_profit
@@ -453,17 +533,22 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         period_growth_sign = "+" if period_growth_percentage >= 0 else ""
         period_growth_str = f"{period_growth_sign}{period_growth_percentage:.2f}%"
 
-        growth_line = f"**درصد رشد اکانت(حال):**`{total_growth_str}`|**درصد رشد بازه:**`{period_growth_str}`\n"
+        growth_line = f"**درصد رشد اکانت(حال):**‎`{total_growth_str}`‏|**درصد رشد بازه:**‎`{period_growth_str}`\n"
         broker_account_line = f"`{account_info.company} | {account_info.login}`\n" if account_info else ""
         
         summary_old = (
         f"**📊 گزارش {title}**\n"
         f"_{start_time.strftime('%Y/%m/%d')} - {display_end_time.strftime('%Y/%m/%d')}_\n\n"
+        f"{actual_date_report}"
         f"{balance_equity_line}"
         f"{profit_line}"
         f"{growth_line}"
-        f"کمیسیون بازه:`{commission:.2f}`|سواپ بازه:`{swap:.2f}`\n"
-        f"**وین ریت بازه:**`{win_rate:.2f}%` ({win_count}/{closed_trades_count})\n"
+        f"کمیسیون بازه:`‎{commission:.2f}`‏|سواپ بازه:‎`{swap:.2f}`\n"
+        f"**نرخ برد بازه:**‎`{win_rate:.2f}%` ‏({win_count}/{closed_trades_count})\n"
+        f"**نرخ برد واقعی:**`‎{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}%` ‏({real_win_count}/{real_win_count + real_loss_count})\n"
+        f"**معاملات سر به سر:** `{breakeven_count}`\n"
+        f"بیشترین س،ض: ‎{max_profit:,.2f}‏|‎{max_loss:,.2f}$\n"
+        f"میانگین س،ض: ‎{avg_profit:,.2f}‏|‎{avg_loss:,.2f}$\n"
         f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
         f"{broker_account_line}"
         f"-----------------------------------"
@@ -478,7 +563,11 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             ["سود خالص", f"{total_balance_change_period:,.2f}$", f"{true_total_account_profit:,.2f}$"],
             ["رشد", f"{period_growth_str}", f"{total_growth_str}"],
             ["نرخ برد", f"({win_count}/{closed_trades_count})%{win_rate:.2f}", Not_available],
-            ["تعداد معاملات", str(closed_trades_count), Not_available],
+            ["نرخ برد واقعی", f"({real_win_count}/{real_win_count + real_loss_count})%{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}", Not_available],
+            ["سر به سر", f"{breakeven_count}", Not_available],
+            ["بیشترین س،ض$", f"{max_loss:.2f},{max_profit:.2f}", Not_available],
+            ["میانگین س،ض$", f"{avg_loss:.2f},{avg_profit:.2f}", Not_available],
+            ["تعداد معامله", f"{closed_trades_count}", Not_available],
             ["کمیسیون", f"{commission:.2f}", Not_available],
             ["سواپ", f"{swap:.2f}", Not_available],
         ]
@@ -487,7 +576,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         col_widths = [
             max(len(str(row[0])) for row in rows),  # ستون اول فارسی
             max(len(str(row[1])) for row in rows),  # ستون عددی وسط
-            max(len(str(row[2])) for row in rows)   # ستون عددی آخر
+            max(len(str(row[2])) for row in rows),  # ستون عددی آخر
         ]
         # col_widths = [max(len(str(row[i])) for row in rows) for i in range(3)]
 
@@ -517,7 +606,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         #     # ستون اول: بدون padding، ستون 2 و 3 راست‌چین
         #     return f"`{str(row[0]).ljust(col_widths[0]-1)}|{str(row[1]).rjust(col_widths[1])}|{str(row[2]).rjust(col_widths[2])}`"
         def format_row(row):
-            col1 = str(row[0]).ljust(col_widths[0]-1)
+            col1 = str(row[0]).ljust(col_widths[0])
             col2 = format_number(str(row[1]), col_widths[1])
             col3 = format_number(str(row[2]), col_widths[2])
             return f"`{col1}|{col2}|{col3}`"
@@ -1205,7 +1294,7 @@ if __name__ == "__main__":
     finally:
         if updater and updater.running:
             # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
-            logging.info("{please wait}Stopping the bot updater...")
+            logging.info("{wait}Stopping updater...")
             updater.stop()
             logging.info("Updater stopped.")
         if mt5.terminal_info():
