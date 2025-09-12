@@ -3,6 +3,7 @@ import time
 import logging
 import colorlog
 import pytz
+import sqlite3
 from flask import Flask, request
 import threading
 import arabic_reshaper
@@ -17,6 +18,7 @@ import io
 from datetime import date
 from dateutil.relativedelta import relativedelta, SA # برای پیدا کردن شنبه
 from telegram import Bot
+from telegram.error import BadRequest, NetworkError
 from datetime import datetime, timedelta # تغییر ضروری: timedelta اضافه شد
 from telegram.ext import Updater, CommandHandler # تغییر ضروری: کتابخانه‌های شنونده اضافه شدند
 from telegram.ext import ConversationHandler, MessageHandler, Filters # کتابخانه تاریخ دستی
@@ -95,12 +97,23 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
-TOKEN = ""
+TOKEN = 
 
 CHAT_ID = 
 
 # --- مراحل مکالمه برای گزارش سفارشی ---
 START_DATE, END_DATE = range(2)
+# +++ کد جدید +++
+# لیستی برای ذخیره شناسه‌های پیام‌های هشدار جهت حذف در آینده
+KEYWORDS_TO_KEEP = [
+    "Position Closed", 
+    "Order Filled",
+    "GMM-Glory",
+    "Position Closed (Partial)",
+    "Position Closed (Complete)"
+]
+# لیست شناسه‌های تمام پیام‌هایی که می‌توانند حذف شوند (چون کلمات کلیدی بالا را ندارند)
+alert_message_ids = []
 
 CHECK_INTERVAL = 5 # فاصله زمانی بین هر چک در حالت عادی
 
@@ -118,6 +131,51 @@ BROKER_TIMEZONE = None
 # --- آستانه برای محاسبه وین ریت واقعی ---
 WINRATE_THRESHOLD_PERCENT = 0.05 # 0.05% of starting balance
 
+# ========================= تنظیمات پایگاه داده =========================
+DB_NAME = "bot_data.db" # نام فایل پایگاه داده شما
+
+def setup_database():
+    """پایگاه داده و جدول مورد نیاز را در صورت عدم وجود ایجاد می‌کند."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    # یک جدول برای نگهداری شناسه‌های پیام ایجاد می‌کنیم
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages_to_delete (
+            message_id INTEGER PRIMARY KEY
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    logging.info("Database setup complete.")
+
+def load_ids_from_db():
+    """شناسه‌های پیام را از پایگاه داده خوانده و در یک لیست برمی‌گرداند."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT message_id FROM messages_to_delete")
+    # نتیجه به صورت لیستی از تاپل‌هاست، آن‌ها را به یک لیست ساده از اعداد تبدیل می‌کنیم
+    ids = [item[0] for item in cursor.fetchall()]
+    conn.close()
+    logging.info(f"Loaded {len(ids)} message IDs from database.")
+    return ids
+
+def add_id_to_db(message_id):
+    """یک شناسه پیام جدید را به پایگاه داده اضافه می‌کند."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    # از INSERT OR IGNORE استفاده می‌کنیم تا اگر شناسه تکراری بود، خطایی رخ ندهد
+    cursor.execute("INSERT OR IGNORE INTO messages_to_delete (message_id) VALUES (?)", (message_id,))
+    conn.commit()
+    conn.close()
+
+def remove_id_from_db(message_id):
+    """یک شناسه پیام را از پایگاه داده حذف می‌کند."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM messages_to_delete WHERE message_id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
 # ====================== اتصال به تلگرام ======================
 bot = Bot(token=TOKEN)
 updater = None
@@ -125,8 +183,8 @@ updater = None
 def send_telegram(text):
     # ۱. تلاش اول انجام می‌شود
     try:
-        bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
-        return True # اگر موفق بود، کار تمام است
+        sent_message = bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
+        return sent_message # --- تغییر: به جای True، کل شیء پیام را برگردان ---
 
     except Exception as e:
         # ۲. اگر تلاش اول ناموفق بود، فقط یک بار هشدار ارسال می‌شود
@@ -142,8 +200,8 @@ def send_telegram(text):
         #logging.error(f"Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})")
         try:
             # تلاش برای ارسال پیام اصلی
-            bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
-            return True
+            sent_message = bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
+            return sent_message # --- تغییر: در حلقه هم شیء پیام را برگردان ---
         except Exception as e:
             if i > 10:
                 bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
@@ -153,7 +211,7 @@ def send_telegram(text):
     logging.critical("❌Could not send message to Telegram after all retries.")
     #send_telegram("❌ Failed to send a message after multiple retries.")
     bot.send_message(chat_id=CHAT_ID, text="❌ Failed to send a message after multiple retries.", parse_mode='Markdown')
-    return False
+    return None # --- تغییر: در صورت شکست نهایی، None برگردان ---
 #----------------- تابع گزارش خطای شبکه listening -------------------
 def handle_error(update, context):
     """خطاهای مربوط به شنونده تلگرام را مدیریت کرده و یک پیام ساده چاپ می‌کند."""
@@ -166,23 +224,39 @@ def handle_error(update, context):
 
 #-------------------- تابع های گزارش تاریخ دستی ----------------------------------------------    
 def custom_report_start(update, context):
+    sent_messages_info = []
     """مکالمه را برای دریافت گزارش سفارشی شروع می‌کند."""
-    update.message.reply_text("لطفاً تاریخ شروع را در فرمت YYYY/MM/DD وارد کنید (مثال: 2025/08/01).\nبرای لغو، /cancel را ارسال کنید.")
+        # ۱. متن پیام را در یک متغیر با نام مشخص قرار دهید
+    prompt_text = "لطفاً تاریخ شروع را در فرمت YYYY/MM/DD وارد کنید (مثال: 2025/08/01).\nبرای لغو، /cancel را ارسال کنید."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+    process_messages_for_clearing(sent_messages_info)
     return START_DATE # به مرحله بعدی (دریافت تاریخ شروع) برو
 
 def received_start_date(update, context):
+    sent_messages_info = []
     """تاریخ شروع را دریافت کرده و منتظر تاریخ پایان می‌ماند."""
     try:
         # تاریخ دریافت شده را در حافظه موقت مکالمه ذخیره می‌کنیم
         naive_start_time = datetime.strptime(update.message.text, '%Y/%m/%d')
         context.user_data['start_date'] = make_aware(naive_start_time)
-        update.message.reply_text("عالی! حالا لطفاً تاریخ پایان را در همان فرمت وارد کنید.")
+        prompt_text = "عالی! حالا لطفاً تاریخ پایان را در همان فرمت وارد کنید."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return END_DATE # به مرحله بعدی (دریافت تاریخ پایان) برو
     except ValueError:
-        update.message.reply_text("فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید.")
+        prompt_text = "فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return START_DATE # در همین مرحله باقی بمان
     
 def received_end_date(update, context):
+    sent_messages_info = []
     """تاریخ پایان را دریافت کرده، گزارش را ساخته و مکالمه را تمام می‌کند."""
     try:
         naive_end_date_input = datetime.strptime(update.message.text, '%Y/%m/%d')
@@ -192,7 +266,11 @@ def received_end_date(update, context):
         # --- بخش جدید: چک می‌کنیم که تاریخ پایان از تاریخ شروع بزرگتر باشد ---
         start_time = context.user_data['start_date']
         if end_time < start_time:
-            update.message.reply_text("خطا: تاریخ پایان نمی‌تواند قبل از تاریخ شروع باشد. لطفاً تاریخ پایان را دوباره وارد کنید یا برای لغو /cancel را ارسال کنید.")
+            prompt_text = "خطا: تاریخ پایان نمی‌تواند قبل از تاریخ شروع باشد. لطفاً تاریخ پایان را دوباره وارد کنید یا برای لغو /cancel را ارسال کنید."
+            sent_msg = update.message.reply_text(prompt_text)
+            if sent_msg:
+                sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+            process_messages_for_clearing(sent_messages_info)
             return END_DATE # در همین مرحله باقی بمان تا کاربر تاریخ جدید را وارد کند
         start_time = context.user_data['start_date']
         
@@ -203,12 +281,21 @@ def received_end_date(update, context):
         context.user_data.clear()
         return ConversationHandler.END
     except ValueError:
-        update.message.reply_text("فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید.")
+        prompt_text = "فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return END_DATE # در همین مرحله باقی بمان
     
 def cancel_conversation(update, context):
     """مکالمه را لغو می‌کند."""
-    update.message.reply_text("عملیات گزارش‌گیری سفارشی لغو شد.")
+    sent_messages_info = []
+    prompt_text = "لغو شد."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+    process_messages_for_clearing(sent_messages_info)
     context.user_data.clear()
     return ConversationHandler.END 
 
@@ -239,21 +326,39 @@ def run_flask_server():
 
 def send_alert_and_log(message):
     """پیام هشدار را به تلگرام ارسال کرده و نتیجه را در یک خط در کنسول چاپ می‌کند."""
-    success = send_telegram(message)
-    if success:
+    sent_message = send_telegram(message)
+    # --- تغییر: اگر پیام با موفقیت ارسال شد، شناسه آن را ذخیره کن ---
+    if sent_message:
+        # بررسی می‌کنیم که آیا هیچ‌کدام از کلمات کلیدی در متن پیام وجود دارد یا نه
+        is_important = any(keyword in message for keyword in KEYWORDS_TO_KEEP)
+        
+        # اگر پیام مهم نبود (کلمات کلیدی را نداشت)، آن را برای حذف علامت‌گذاری کن
+        if not is_important:
+            # messages_to_clear.append(sent_message.message_id)
+            alert_message_ids.append(sent_message.message_id)
+            add_id_to_db(sent_message.message_id) # +++ این خط را اضافه کنید +++
+            # logging.info(f"(Payload marked for clearing, ID: {sent_message.message_id})")
+        # else:
+        #     logging.info(f"(Payload is important, ID: {sent_message.message_id})")
         logging.info(f"(Send payload ok)")
     else:
         logging.error(f"(Send payload error)")
-    # status = "(Send payload ok)" if success else f"(Send payload error)"
+    # status = "(Send payload ok)" if sent_message else f"(Send payload error)"
     # logging.info(f"{message.strip()}{status}")
     # logging.info(f"{status}")
 
 # ====================== توابع گزارش‌گیری ======================
 def generate_and_send_report(update, context, start_time, end_time, title):
+    sent_messages_info = [] # <--- لیست محلی برای این تابع
+    
     """موتور اصلی برای ساخت و ارسال تمام گزارش‌ها"""
     terminal_info = mt5.terminal_info()
     if not terminal_info or not terminal_info.connected:
-        update.message.reply_text("اسکریپت به متاتریدر متصل نیست. لطفاً چند لحظه دیگر دوباره تلاش کنید.")
+        prompt_text = "اسکریپت به متاتریدر متصل نیست. لطفاً چند لحظه دیگر دوباره تلاش کنید."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return
     # به جای 0، از یک تاریخ معقول در گذشته (مثلاً ۵ سال قبل) شروع می‌کنیم
     # این کار از محدودیت‌های احتمالی بروکر جلوگیری می‌کند
@@ -264,7 +369,11 @@ def generate_and_send_report(update, context, start_time, end_time, title):
     deals = mt5.history_deals_get(start_date_for_history, end_time)
 
     if not deals:
-        update.message.reply_text(f"در بازه زمانی گزارش ({title}) هیچ معامله‌ای یافت نشد.")
+        prompt_text = f"در بازه زمانی گزارش ({title}) هیچ معامله‌ای یافت نشد."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return
 
     report_lines, total_profit, closed_trades_count, win_count = [], 0.0, 0, 0
@@ -397,7 +506,11 @@ def generate_and_send_report(update, context, start_time, end_time, title):
     
         
     if not report_lines:
-        update.message.reply_text(f"در بازه زمانی گزارش ({title}) هیچ پوزیشنی بسته نشده است.")
+        prompt_text = f"در بازه زمانی گزارش ({title}) هیچ پوزیشنی بسته نشده است."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return
 
     win_rate = (win_count / closed_trades_count * 100) if closed_trades_count > 0 else 0
@@ -641,33 +754,45 @@ def generate_and_send_report(update, context, start_time, end_time, title):
 
         # ارسال به تلگرام بدون monospace
         summary = "\n".join(lines)
-        # update.message.reply_text(summary)
+        # sent_msg = update.message.reply_text(summary)
 
 
-
-    update.message.reply_text(summary_old, parse_mode='Markdown')
-    update.message.reply_text(summary, parse_mode='Markdown')
+    sent_msg = update.message.reply_text(summary_old, parse_mode='Markdown')
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': summary_old})
+    sent_msg = update.message.reply_text(summary, parse_mode='Markdown')
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': summary})
     time.sleep(1) 
 
     # --- بخش جدید: اضافه کردن هدر ---
-    update.message.reply_text("#N| Symbol | lot   |          Profit | Date")
-    
+    prompt_text = f"#N| Symbol | lot   |          Profit | Date"
+    sent_msg = update.message.reply_text(prompt_text, parse_mode='Markdown')
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+
     CHUNK_SIZE = 40
     for i in range(0, len(report_lines), CHUNK_SIZE):
         chunk = report_lines[i:i + CHUNK_SIZE]
         message_part = "\n".join(chunk)
-        update.message.reply_text(message_part, parse_mode='Markdown')
+        sent_msg = update.message.reply_text(message_part, parse_mode='Markdown')
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': message_part})
         time.sleep(1)
 
     # ساخت لیست تمیز از پوزیشن‌های نهایی برای ارسال به تابع نمودار
     fully_closed_positions = [pos_data for position_id, pos_data in sorted_positions]
     # فراخوانی تابع برای ساخت و ارسال نمودار
     create_and_send_growth_chart(update, context, fully_closed_positions, starting_balance_period, title)   
-        
-    update.message.reply_text("End report.\nmonitoring continue...")
-
+    prompt_text = "End report.\nmonitoring continue..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+    process_messages_for_clearing(sent_messages_info)
+    
 # ====================== رسم نمودار رشد ======================
 def create_and_send_growth_chart(update, context, fully_closed_positions, starting_balance, title):
+    sent_messages_info = []
     """نمودار رشد حساب را ساخته و به تلگرام ارسال می‌کند."""
     logging.info("Creating growth chart...")
     
@@ -700,7 +825,11 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
 
     if not closed_deals:
         logging.warning("No closing deals to chart.")
-        update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
+        prompt_text = "در بازه زمانی گزارش هیچ پوزیشنی بسته نشده است."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         return
 
     # اضافه کردن نقطه شروع نمودار (معامله شماره صفر)
@@ -717,9 +846,13 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     # --- این شرط حیاتی را اضافه کنید ---
     if len(trade_numbers) < 4:
         logging.warning("Not enough data to create a chart.")
-        update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
+        prompt_text = "تعداد معاملات برای رسم نمودار کافی نیست."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
         # در صورت تمایل می‌توانید یک پیام مناسب به کاربر تلگرام بفرستید
-        # update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
+        # sent_msg = update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
         return # از ادامه تابع و بروز خطا جلوگیری می‌کند
     
     # ۲. رسم نمودار با خطوط منحنی و نرم
@@ -791,100 +924,139 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     
     # ۴. ارسال تصویر به تلگرام
     logging.info("Sending chart to Telegram...")
-    update.message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
-    
+    send_msg = update.message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
+    if send_msg:
+        sent_messages_info.append({'id': send_msg.message_id, 'text': f"نمودار رشد: {title}"})
     # بستن نمودار برای آزاد کردن حافظه
     plt.close()
     buf.close()
     logging.info("RAM freed.")
     logging.info("Monitoring continue...")
+    process_messages_for_clearing(sent_messages_info)
+
 # ============================================== گزارش روزانه ===========================================================
 def _24H_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش 24 ساعته گذشته...")
+        # ۱. متن پیام را در یک متغیر با نام مشخص قرار دهید
+    sent_messages_info = []        
+    prompt_text = "در حال تهیه گزارش 24 ساعته گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     end_time = get_server_time()
     start_time = end_time - timedelta(hours=24)
+    process_messages_for_clearing(sent_messages_info)
     generate_and_send_report(update, context, start_time, end_time, "۲۴ ساعت گذشته")
 
 def _3days_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش ۳ روز گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۳ روز گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     end_time = get_server_time()
     naive_start_time = datetime.combine(end_time.date() - timedelta(days=3), datetime.min.time())
     start_time = make_aware(naive_start_time)
+    process_messages_for_clearing(sent_messages_info)
     generate_and_send_report(update, context, start_time, end_time, "۳ روز گذشته")
     
 def _7day_report(update, context):
-    """گزارش ۷ روز گذشته را با استفاده از موتور گزارش‌ساز مرکزی تهیه می‌کند."""
-    update.message.reply_text("در حال تهیه گزارش ۷ روز گذشته...")
-    
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۷ روز گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+
     # محاسبه بازه زمانی ۷ روز گذشته
     end_time = get_server_time()
     # end_time = datetime.now() # یا get_server_time()
     naive_start_time = datetime.combine(end_time.date() - timedelta(days=7), datetime.min.time())
     start_time = make_aware(naive_start_time)
-    
+    process_messages_for_clearing(sent_messages_info)
     # فراخوانی موتور اصلی گزارش‌ساز
     generate_and_send_report(update, context, start_time, end_time, "۷ روز گذشته")
 
 def _14day_report(update, context):
-    """گزارش ۱۴ روز گذشته را با استفاده از موتور گزارش‌ساز مرکزی تهیه می‌کند."""
-    update.message.reply_text("در حال تهیه گزارش ۱۴ روز گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۱۴ روز گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
 
     # محاسبه بازه زمانی ۱۴ روز گذشته
     end_time = get_server_time()
     naive_start_time = datetime.combine(end_time.date() - timedelta(days=14), datetime.min.time())
     start_time = make_aware(naive_start_time)
-
+    process_messages_for_clearing(sent_messages_info)
     # فراخوانی موتور اصلی گزارش‌ساز
     generate_and_send_report(update, context, start_time, end_time, "۱۴ روز گذشته")
 
 def _30day_report(update, context):
-    """گزارش ۳۰ روز گذشته را با استفاده از موتور گزارش‌ساز مرکزی تهیه می‌کند."""
-    update.message.reply_text("در حال تهیه گزارش ۳۰ روز گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۳۰ روز گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
 
     # محاسبه بازه زمانی ۳۰ روز گذشته
     end_time = get_server_time()
     naive_start_time = datetime.combine(end_time.date() - timedelta(days=30), datetime.min.time())
     start_time = make_aware(naive_start_time)
-
+    process_messages_for_clearing(sent_messages_info)
     # فراخوانی موتور اصلی گزارش‌ساز
     generate_and_send_report(update, context, start_time, end_time, "۳۰ روز گذشته")
 
 def _60day_report(update, context):
-    """گزارش ۶۰ روز گذشته را با استفاده از موتور گزارش‌ساز مرکزی تهیه می‌کند."""
-    update.message.reply_text("در حال تهیه گزارش ۶۰ روز گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۶۰ روز گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
 
     # محاسبه بازه زمانی ۶۰ روز گذشته
     end_time = get_server_time()
     naive_start_time = datetime.combine(end_time.date() - timedelta(days=60), datetime.min.time())
     start_time = make_aware(naive_start_time)
-
+    process_messages_for_clearing(sent_messages_info)
     # فراخوانی موتور اصلی گزارش‌ساز
     generate_and_send_report(update, context, start_time, end_time, "۶۰ روز گذشته")
 
 def _90day_report(update, context):
-    """گزارش ۹۰ روز گذشته را با استفاده از موتور گزارش‌ساز مرکزی تهیه می‌کند."""
-    update.message.reply_text("در حال تهیه گزارش ۹۰ روز گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۹۰ روز گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
 
     # محاسبه بازه زمانی ۹۰ روز گذشته
     end_time = get_server_time()
     naive_start_time = datetime.combine(end_time.date() - timedelta(days=90), datetime.min.time())
     start_time = make_aware(naive_start_time)
-
+    process_messages_for_clearing(sent_messages_info)
     # فراخوانی موتور اصلی گزارش‌ساز
     generate_and_send_report(update, context, start_time, end_time, "۹۰ روز گذشته") 
     
 #--------------------توابع گزارش‌گیری بر اساس هفته و ماه--------------------
 def today_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش امروز...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش امروز..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+
     server_now = get_server_time()
     naive_start_time = datetime.combine(server_now.date(), datetime.min.time())
     start_time = make_aware(naive_start_time)
     end_time = server_now
+    process_messages_for_clearing(sent_messages_info)
     # logging.info(f"Start time: {start_time}, End time: {end_time}")
     generate_and_send_report(update, context, start_time, end_time, "امروز")
     
 def last_week_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش هفته گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش هفته گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     today = get_server_time().date()
     # پیدا کردن شنبه هفته جاری
     last_saturday = today + relativedelta(weekday=SA(-1))
@@ -892,39 +1064,60 @@ def last_week_report(update, context):
     naive_end_time = datetime.combine(last_saturday, datetime.min.time())
     end_time = make_aware(naive_end_time)
     start_time = end_time - timedelta(days=7)
+    process_messages_for_clearing(sent_messages_info)
     generate_and_send_report(update, context, start_time, end_time, "هفته گذشته")
 
 def last_2_weeks_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش ۲ هفته گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۲ هفته گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     today = get_server_time().date()
     last_saturday = today + relativedelta(weekday=SA(-1))
     naive_end_time = datetime.combine(last_saturday, datetime.min.time())
     end_time = make_aware(naive_end_time)
     start_time = end_time - timedelta(days=14)
+    process_messages_for_clearing(sent_messages_info)
     generate_and_send_report(update, context, start_time, end_time, "دو هفته گذشته")
 
 def last_month_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش ماه گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ماه گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     today = get_server_time().date()
     naive_end_time = datetime(today.year, today.month, 1)
     end_time = make_aware(naive_end_time)
     start_time = end_time - relativedelta(months=1)
+    process_messages_for_clearing(sent_messages_info)    
     generate_and_send_report(update, context, start_time, end_time, "ماه گذشته")
 
 def last_2_months_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش ۲ ماه گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۲ ماه گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     today = get_server_time().date()
     naive_end_time = datetime(today.year, today.month, 1)
     end_time = make_aware(naive_end_time)
     start_time = end_time - relativedelta(months=2)
+    process_messages_for_clearing(sent_messages_info)
     generate_and_send_report(update, context, start_time, end_time, "دو ماه گذشته")
 
 def last_3_months_report(update, context):
-    update.message.reply_text("در حال تهیه گزارش ۳ ماه گذشته...")
+    sent_messages_info = []
+    prompt_text = "در حال تهیه گزارش ۳ ماه گذشته..."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     today = get_server_time().date()
     naive_end_time = datetime(today.year, today.month, 1)
     end_time = make_aware(naive_end_time)
     start_time = end_time - relativedelta(months=3)
+    process_messages_for_clearing(sent_messages_info)
     generate_and_send_report(update, context, start_time, end_time, "سه ماه گذشته")
      
 # ====================== توابع قالب‌بندی پیام‌ها ======================
@@ -1055,6 +1248,83 @@ def make_aware(dt):
     broker_tz = pytz.timezone(BROKER_TIMEZONE)
     return broker_tz.localize(dt)
 
+# ====================== تابع پاک کردن هشدارها ======================
+def clear_alerts(update, context):
+    """
+    پیام‌های هشدار ذخیره شده را پاک می‌کند.
+    در صورت بروز خطای شبکه، شناسه پیام را برای تلاش مجدد نگه می‌دارد.
+    """
+    if not alert_message_ids:
+        update.message.reply_text("هیچ پیام غیر ضروری برای پاک کردن وجود ندارد.")
+        return
+
+    logging.info(f"Attempting to delete {len(alert_message_ids)} messages...")
+    update.message.reply_text(f"در حال پاک‌سازی {len(alert_message_ids)} پیام غیر ضروری...")
+    
+    deleted_count = 0
+    failed_permanently_count = 0
+    failed_temporarily_count = 0
+
+    # از یک کپی پیمایش می‌کنیم تا بتوانیم لیست اصلی را در حین کار ویرایش کنیم
+    for msg_id in list(alert_message_ids):
+        try:
+            bot.delete_message(chat_id=CHAT_ID, message_id=msg_id)
+            # اگر حذف موفق بود، از لیست اصلی هم پاک کن
+            alert_message_ids.remove(msg_id)
+            remove_id_from_db(msg_id)
+            deleted_count += 1
+            time.sleep(0.01)  # جلوگیری از محدودیت‌های تلگرام
+
+        except BadRequest as e:
+            # این خطاها یعنی پیام قابل حذف نیست (قدیمی، پاک شده و...)
+            # پس دیگر برای حذفش تلاش نمی‌کنیم و از لیست پاکش می‌کنیم
+            logging.warning(f"Could not delete message ID {msg_id}, Permanent error: {e}")
+            alert_message_ids.remove(msg_id)
+            remove_id_from_db(msg_id)
+            failed_permanently_count += 1
+
+        except NetworkError as e:
+            # این خطا یعنی مشکل از شبکه است، پس شناسه را برای تلاش بعدی نگه می‌داریم
+            logging.warning(f"Could not delete message ID {msg_id}, Network error: {e}")
+            failed_temporarily_count += 1
+
+        except Exception as e:
+            # برای خطاهای ناشناخته، برای احتیاط شناسه را نگه می‌داریم
+            logging.error(f"Could not delete message ID {msg_id}, Unknown error: {e}")
+            failed_temporarily_count += 1
+
+    # ساخت پیام نهایی برای کاربر
+    # confirmation_parts = [f"عملیات پاک‌سازی انجام شد."]
+    # confirmation_parts.append(f"✅ {deleted_count} پیام با موفقیت حذف شد.")
+    confirmation_parts = [f"✅ {deleted_count} پیام با موفقیت حذف شد."]
+    if failed_permanently_count > 0:
+        confirmation_parts.append(f"❌ {failed_permanently_count} پیام قابل حذف نبود (قدیمی یا ناموجود).")
+
+    if failed_temporarily_count > 0:
+        confirmation_parts.append(f"⚠️ {failed_temporarily_count} پیام به دلیل خطای شبکه حذف نشد (در اجرای بعدی دوباره تلاش خواهد شد).")
+
+    confirmation_message = "\n".join(confirmation_parts)
+    update.message.reply_text(confirmation_message)
+    
+    remaining_count = len(alert_message_ids)
+    logging.info(f"Deleted:{deleted_count}, F Permn:{failed_permanently_count}, F Tempo:{failed_temporarily_count}, Remaining:{remaining_count}.")
+
+def process_messages_for_clearing(sent_messages_info):
+    """
+    یک لیست از اطلاعات پیام‌های ارسال شده را گرفته، آن‌ها را بررسی کرده 
+    و شناسه‌های پیام‌های غیرمهم را به لیست اصلی حذفی‌ها اضافه می‌کند.
+    """
+    # logging.info(f"Processing {len(sent_messages_info)} sent messages for clearing...")
+    for msg_info in sent_messages_info:
+        # شرط را برای هر پیام ذخیره شده اجرا می‌کنیم
+        is_important = any(keyword in msg_info['text'] for keyword in KEYWORDS_TO_KEEP)
+        
+        # اگر پیام مهم نبود، شناسه‌اش را به لیست اصلی حذفی‌ها اضافه کن
+        if not is_important:
+            alert_message_ids.append(msg_info['id'])
+            add_id_to_db(msg_info['id']) # شناسه را در پایگاه داده هم ذخیره می‌کند
+            # logging.info(f"Message ID {msg_info['id']} marked for clearing.")
+
 # ====================== تابع اصلی مانیتورینگ ======================
 def main():
     # --- تغییر کلیدی: راه‌اندازی وب‌سرور در یک ترد پس‌زمینه ---
@@ -1080,6 +1350,7 @@ def main():
             )
             
             dispatcher.add_handler(conv_handler)
+            dispatcher.add_handler(CommandHandler("clear", clear_alerts))
             dispatcher.add_handler(CommandHandler("time", _24H_report))
             dispatcher.add_handler(CommandHandler("3days", _3days_report))
             dispatcher.add_handler(CommandHandler("7day", _7day_report))
@@ -1102,10 +1373,14 @@ def main():
 
         except Exception as e:
             # اگر اینترنت وصل نبود، خطا را چاپ کرده و حلقه را تکرار می‌کنیم
-            logging.error(f"--initial listener run fail Retrying in 10 seconds...")
+            logging.error(f"initial listener run fail Retrying in 10 seconds...")
             time.sleep(10)
             continue
-    
+        # +++ این دو خط را اضافه کنید +++
+    setup_database() # پایگاه داده را آماده می‌کند
+    global alert_message_ids
+    alert_message_ids = load_ids_from_db() # شناسه‌های قدیمی را بارگذاری می‌کند
+
     is_connected = False
     disconnect_time = None
     last_check_time = None # در ابتدا خالی است و پس از اولین اتصال مقداردهی می‌شود
@@ -1281,24 +1556,40 @@ if __name__ == "__main__":
         # اگر ناموفق بود، ۱۰ ثانیه صبر کرده و دوباره تلاش کن
         logging.info("Retrying timezone detection in 10 seconds...")
         time.sleep(10)
-
-    # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن           
-    try:
-        main()
-    except KeyboardInterrupt:
-        send_telegram("ℹ️ *Script Stopped Manually*")
-        logging.info("Script stopped by user.")
-    except Exception as e:
-        send_telegram(f"❌ *CRITICAL ERROR*\nBot has crashed!\nError: {e}")
-        logging.critical(f"Critical Error: {e}")
-    finally:
-        if updater and updater.running:
-            # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
-            logging.info("{wait}Stopping updater...")
-            updater.stop()
-            logging.info("Updater stopped.")
-        if mt5.terminal_info():
-            mt5.shutdown()
-        logging.info("Script exited gracefully.")
+    # +++ حلقه نگهبان برای اجرای بی‌پایان اسکریپت +++
+    while True:
+        # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن           
+        try:
+            main()
+        except KeyboardInterrupt:
+            send_telegram("ℹ️ *Script Stopped Manually*")
+            logging.info("Script stopped by user.")
+            break # <--- این break برای خروج از حلقه نگهبان ضروری است
+        
+        except Exception as e:
+            # اول خطای اصلی را در لاگ کنسول ثبت کن
+            # logging.critical(f"Critical unhandled error caught: {e}")
+            logging.critical(f"Critical Error: {e}")
+            # حالا سعی کن به تلگرام هم خبر بدهی، اما نگذار این تلاش خودش باعث کرش شود
+            try:
+                send_telegram(f"❌ *CRITICAL ERROR*\nBot has crashed!\nError: {e}")
+            except Exception as report_error:
+                # اگر حتی ارسال گزارش خطا هم شکست خورد، فقط در لاگ کنسول بنویس
+                logging.error(f"Could not send the final crash notification to Telegram: {report_error}")
+            
+            # کمی صبر می‌کنیم تا از حلقه کرش سریع (crash-loop) جلوگیری شود
+            logging.info("Restarting the script...")
+            time.sleep(30)
+            # سپس حلقه نگهبان دوباره main() را اجرا می‌کند
+            
+            
+    if updater and updater.running:
+        # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
+        logging.info("{wait}Stopping updater...")
+        updater.stop()
+        logging.info("Updater stopped.")
+    if mt5.terminal_info():
+        mt5.shutdown()
+    logging.info("Script exited gracefully.")
 
 
