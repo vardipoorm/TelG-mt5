@@ -28,6 +28,7 @@ UQDCMQm4IiKfkbK7knZnDiIJ4zqzBkmx7ozJDk1Uk6OQrNHG
 
 *.   از `@BotFather` استفاده کنید و ربات رو درست کنید و توی گوگل سرچ کنید باقیشو من حوصله ندارم. این دستورات رو هم به ربات بدید با دستور `/setcommands`
 ```bash
+clear - پاکسازی پیامهای غیرضرور
 custom_report - تاریخ دستی
 time - گزارش 24 ساعت گذشته
 3days - گزارش سه روز گذشته
@@ -120,15 +121,17 @@ run python mt5-telegram.bat
 -----
 
 تصاویر 
+<img width="485" height="755" alt="image" src="https://github.com/user-attachments/assets/7070a07b-220b-4ab3-86b1-ded57790386e" />
 
-<img width="575" height="628" alt="image" src="https://github.com/user-attachments/assets/f4e78a52-1f2e-4e78-ab0e-8a2107ddd799" />
+<img width="481" height="233" alt="image" src="https://github.com/user-attachments/assets/dc6bdaf0-3aac-4b6d-98aa-358230e17249" />
+
+<img width="575" height="628" alt="image" src="https://github.com/user-attachments/assets/d0485334-99e2-4c74-ac1a-2c4ba951a386" />
+
+<img width="957" height="887" alt="image" src="https://github.com/user-attachments/assets/5ac56abd-34be-4326-b16e-6b71a8c3d112" />
 
 
 
-<img width="490" height="953" alt="image" src="https://github.com/user-attachments/assets/a0d95b7e-8199-44ee-8031-1c72b09a3875" />
 
-
-<img width="476" height="499" alt="image" src="https://github.com/user-attachments/assets/0f748595-43b1-4109-a2c7-7a2abc672f77" />
 
 
 
