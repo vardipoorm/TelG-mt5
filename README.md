@@ -121,13 +121,15 @@ run python mt5-telegram.bat
 -----
 
 تصاویر 
+
 <img width="485" height="755" alt="image" src="https://github.com/user-attachments/assets/7070a07b-220b-4ab3-86b1-ded57790386e" />
 
 <img width="481" height="233" alt="image" src="https://github.com/user-attachments/assets/dc6bdaf0-3aac-4b6d-98aa-358230e17249" />
 
 <img width="575" height="628" alt="image" src="https://github.com/user-attachments/assets/d0485334-99e2-4c74-ac1a-2c4ba951a386" />
 
-<img width="957" height="887" alt="image" src="https://github.com/user-attachments/assets/5ac56abd-34be-4326-b16e-6b71a8c3d112" />
+<img width="959" height="880" alt="image" src="https://github.com/user-attachments/assets/4bbc2e35-18f3-447c-8ef4-99b2c93f54e8" />
+
 
 
 
