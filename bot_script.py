@@ -1,6 +1,7 @@
 import MetaTrader5 as mt5
 import time
 import logging
+import os
 import colorlog
 import pytz
 import sqlite3
@@ -132,7 +133,11 @@ BROKER_TIMEZONE = None
 WINRATE_THRESHOLD_PERCENT = 0.05 # 0.05% of starting balance
 
 # ========================= تنظیمات پایگاه داده =========================
-DB_NAME = "bot_data.db" # نام فایل پایگاه داده شما
+# آدرس کامل پوشه‌ای که اسکریپت در آن قرار دارد را پیدا می‌کند
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# آدرس کامل فایل پایگاه داده را می‌سازد
+DB_NAME = os.path.join(SCRIPT_DIR, "bot_data.db")
+# DB_NAME = "bot_data.db" # نام فایل پایگاه داده شما
 
 def setup_database():
     """پایگاه داده و جدول مورد نیاز را در صورت عدم وجود ایجاد می‌کند."""
@@ -1578,7 +1583,13 @@ if __name__ == "__main__":
                 logging.error(f"Could not send the final crash notification to Telegram: {report_error}")
             
             # کمی صبر می‌کنیم تا از حلقه کرش سریع (crash-loop) جلوگیری شود
-            logging.info("Restarting the script...")
+            if updater and updater.running:
+                # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
+                logging.info("{wait}Stopping updater...")
+                updater.stop()
+                logging.info("Updater stopped.")
+                
+            logging.info("Restarting the script(30s)...")
             time.sleep(30)
             # سپس حلقه نگهبان دوباره main() را اجرا می‌کند
             
