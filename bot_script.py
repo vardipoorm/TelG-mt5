@@ -23,7 +23,9 @@ from telegram.error import BadRequest, NetworkError
 from datetime import datetime, timedelta # تغییر ضروری: timedelta اضافه شد
 from telegram.ext import Updater, CommandHandler # تغییر ضروری: کتابخانه‌های شنونده اضافه شدند
 from telegram.ext import ConversationHandler, MessageHandler, Filters # کتابخانه تاریخ دستی
-# این کد تا قبل از تغییر محاسبه سود بازه برای واریز و برداشت ها اوکیه
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler
+# تا اینجا بجز سفارشی درست شده
 
 # ====================== ساکت کردن گزارشگرهای پیش‌فرض تلگرام ======================
 # این بخش گزارش‌های خطای شبکه‌ای پیش‌فرض کتابخانه تلگرام و وابستگی‌های آن را غیرفعال می‌کند
@@ -98,12 +100,13 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
-TOKEN = 
-
-CHAT_ID = 
+TOKEN = "***REMOVED***"
+#CHAT_ID = ***REMOVED*** ***REMOVED***
+CHAT_ID = ***REMOVED*** ***REMOVED***
 
 # --- مراحل مکالمه برای گزارش سفارشی ---
 START_DATE, END_DATE = range(2)
+GET_SINGLE_DATE = range(1)
 # +++ کد جدید +++
 # لیستی برای ذخیره شناسه‌های پیام‌های هشدار جهت حذف در آینده
 KEYWORDS_TO_KEEP = [
@@ -228,6 +231,47 @@ def handle_error(update, context):
         logging.critical(f"listener unhandled error: {context.error}")
 
 #-------------------- تابع های گزارش تاریخ دستی ----------------------------------------------    
+# ====================== توابع گزارش روز خاص ======================
+def single_day_report_start(update, context):
+    """مکالمه را برای دریافت گزارش یک روز خاص شروع می‌کند."""
+    sent_messages_info = []
+    prompt_text = "لطفاً تاریخ مورد نظر را در فرمت YYYY/MM/DD وارد کنید (مثال: 2025/09/01).\nبرای لغو، /cancel را ارسال کنید."
+    sent_msg = update.message.reply_text(prompt_text)
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+    process_messages_for_clearing(sent_messages_info)
+    return GET_SINGLE_DATE # به مرحله دریافت تاریخ برو
+
+def received_single_date(update, context):
+    """تاریخ را دریافت کرده، گزارش آن روز را ساخته و مکالمه را تمام می‌کند."""
+    sent_messages_info = []
+    try:
+        report_date = datetime.strptime(update.message.text, '%Y/%m/%d')
+        
+        # محاسبه شروع و پایان روز وارد شده
+        naive_start_time = report_date.replace(hour=0, minute=0, second=0)
+        naive_end_time = report_date.replace(hour=23, minute=59, second=59)
+        
+        start_time = make_aware(naive_start_time)
+        end_time = make_aware(naive_end_time)
+        
+        # عنوان گزارش را بر اساس تاریخ ورودی تنظیم می‌کنیم
+        report_title = f"روز {report_date.strftime('%Y/%m/%d')}"
+        
+        # فراخوانی موتور اصلی گزارش‌ساز
+        generate_and_send_report(update.message, context, start_time, end_time, report_title)
+        
+        # پایان مکالمه
+        return ConversationHandler.END
+
+    except ValueError:
+        prompt_text = "فرمت تاریخ اشتباه است. لطفاً دوباره در فرمت YYYY/MM/DD وارد کنید یا برای لغو /cancel را ارسال کنید."
+        sent_msg = update.message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+        process_messages_for_clearing(sent_messages_info)
+        return GET_SINGLE_DATE # در همین مرحله باقی بمان
+
 def custom_report_start(update, context):
     sent_messages_info = []
     """مکالمه را برای دریافت گزارش سفارشی شروع می‌کند."""
@@ -280,7 +324,7 @@ def received_end_date(update, context):
         start_time = context.user_data['start_date']
         
         # فراخوانی موتور اصلی گزارش‌ساز با تاریخ‌های سفارشی
-        generate_and_send_report(update, context, start_time, end_time, "سفارشی")
+        generate_and_send_report(update.message, context, start_time, end_time, "سفارشی")
         
         # پاک کردن حافظه موقت و پایان مکالمه
         context.user_data.clear()
@@ -353,14 +397,165 @@ def send_alert_and_log(message):
     # logging.info(f"{status}")
 
 # ====================== توابع گزارش‌گیری ======================
-def generate_and_send_report(update, context, start_time, end_time, title):
+# ================ تابع محاسبه دراودان بالانس ==================
+def calculate_drawdown_for_period(deals_history, start_date, end_date):
+    """
+    حداکثر دراودان اکوئیتی را برای یک بازه زمانی مشخص محاسبه می‌کند.
+    این تابع از تاریخچه کل معاملات استفاده می‌کند تا اکوئیتی اولیه را به درستی پیدا کند.
+    """
+    if not deals_history:
+        return {'amount': 0.0, 'percent': 0.0}
+
+    # مرتب‌سازی کل تاریخچه بر اساس زمان (برای اطمینان)
+    deals_history = sorted(deals_history, key=lambda d: d.time_msc)
+
+    # ۱. محاسبه اکوئیتی اولیه تا قبل از شروع بازه گزارش
+    initial_equity = 0.0
+    for deal in deals_history:
+        deal_time = datetime.fromtimestamp(deal.time, tz=pytz.utc)
+        if deal_time < start_date:
+            initial_equity += deal.profit + deal.commission + deal.swap
+        else:
+            break # معاملات وارد بازه گزارش شدند، محاسبه اولیه تمام است
+
+    # ۲. محاسبه دراودان فقط برای معاملات داخل بازه گزارش
+    max_equity_in_period = initial_equity
+    current_equity = initial_equity
+    max_drawdown_amount = 0.0
+
+    for deal in deals_history:
+        deal_time = datetime.fromtimestamp(deal.time, tz=pytz.utc)
+        # فقط معاملاتی که در بازه زمانی ما هستند را پردازش کن
+        if start_date <= deal_time <= end_date:
+            current_equity += deal.profit + deal.commission + deal.swap
+            
+            if current_equity > max_equity_in_period:
+                max_equity_in_period = current_equity
+            
+            current_drawdown = max_equity_in_period - current_equity
+            
+            if current_drawdown > max_drawdown_amount:
+                max_drawdown_amount = current_drawdown
+
+    # محاسبه درصد دراودان نسبت به بالاترین اکوئیتی در همان بازه
+    # اگر قله منفی باشد، درصد دراودان معنا ندارد و صفر در نظر گرفته می‌شود
+    if max_equity_in_period <= 0:
+         max_drawdown_percent = 0.0
+    else:
+        max_drawdown_percent = (max_drawdown_amount / max_equity_in_period * 100)
+
+    return {
+        'amount': round(max_drawdown_amount, 2),
+        'percent': round(max_drawdown_percent, 2)
+    }
+
+# ====================== تابع دکمه ی جزئیات و نمودار ======================
+def report_button_handler(update, context):
+    sent_messages_info = []
+    """پاسخ دکمه‌های انتخاب نوع گزارش را مدیریت می‌کند."""
+    query = update.callback_query
+    query.answer()
+    
+    # --- بخش جدید برای مدیریت دکمه لغو ---
+    if query.data == 'cancel_operation':
+        sent_msg = query.edit_message_text(text="عملیات لغو شد.")
+        if sent_msg:
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': sent_msg.text})
+            process_messages_for_clearing(sent_messages_info)
+        return # از ادامه اجرای تابع جلوگیری می‌کند
+    # --- پایان بخش جدید ---
+    # داده‌های ارسالی از دکمه را جدا می‌کنیم، مثلا '7day_full'
+    parts = query.data.split('_')
+    report_type = parts[0]
+    mode = "_".join(parts[1:]) # 'full' or 'chart_only'
+
+    # محاسبه بازه زمانی بر اساس نوع گزارش
+    end_time = get_server_time()
+    start_time = None
+    title = ""
+
+    # این بلوک if/elif برای مدیریت انواع گزارش ضروری است
+    if report_type == 'time': 
+        title = "۲۴ ساعت گذشته"
+        start_time = end_time - timedelta(hours=24)
+    elif report_type == '3days':
+        title = "۳ روز گذشته"
+        start_time = make_aware(datetime.combine(end_time.date() - timedelta(days=3), datetime.min.time()))
+    elif report_type == '7day':
+        title = "۷ روز گذشته"
+        start_time = make_aware(datetime.combine(end_time.date() - timedelta(days=7), datetime.min.time()))
+    elif report_type == '14day':
+        start_time = make_aware(datetime.combine(end_time.date() - timedelta(days=14), datetime.min.time()))
+        title = "۱۴ روز گذشته"
+    elif report_type == '30day':
+        start_time = make_aware(datetime.combine(end_time.date() - timedelta(days=30), datetime.min.time()))
+        title = "۳۰ روز گذشته"
+    elif report_type == '60day':
+        start_time = make_aware(datetime.combine(end_time.date() - timedelta(days=60), datetime.min.time()))
+        title = "۶۰ روز گذشته"
+    elif report_type == '90day':
+        start_time = make_aware(datetime.combine(end_time.date() - timedelta(days=90), datetime.min.time()))
+        title = "۹۰ روز گذشته"
+    elif report_type == 'today':
+        start_time = make_aware(datetime.combine(end_time.date(), datetime.min.time()))
+        title = "امروز"
+    elif report_type == 'yesterday':
+        # محاسبه بازه زمانی دیروز
+        yesterday_date = end_time.date() - timedelta(days=1)
+        # شروع دیروز: ساعت ۰۰:۰۰:۰۰
+        start_time = make_aware(datetime.combine(yesterday_date, datetime.min.time()))
+        # پایان دیروز: ساعت ۲۳:۵۹:۵۹
+        end_time = make_aware(datetime.combine(yesterday_date, datetime.max.time()).replace(microsecond=0))
+        title = "دیروز"
+    elif report_type == 'lastweek':
+        # محاسبه بازه زمانی هفته گذشته (دوشنبه تا یکشنبه)
+        today = end_time.date()
+        last_saturday = today + relativedelta(weekday=SA(-1))
+        end_time = make_aware(datetime.combine(last_saturday, datetime.min.time()))
+        start_time = end_time - timedelta(days=7)
+        title = "هفته گذشته"
+    elif report_type == 'last2weeks':
+        today = end_time.date()
+        last_saturday = today + relativedelta(weekday=SA(-1))
+        end_time = make_aware(datetime.combine(last_saturday, datetime.min.time()))
+        start_time = end_time - timedelta(days=14)
+        title = "۲ هفته گذشته"
+    elif report_type == 'lastmonth':
+        today = end_time.date()
+        end_time = make_aware(datetime(today.year, today.month, 1))
+        start_time = end_time - relativedelta(months=1)
+        title = "ماه گذشته"
+    elif report_type == 'last2months':
+        today = end_time.date()
+        end_time = make_aware(datetime(today.year, today.month, 1))
+        start_time = end_time - relativedelta(months=2)
+        title = "۲ ماه گذشته"
+    elif report_type == 'last3months':
+        today = end_time.date()
+        end_time = make_aware(datetime(today.year, today.month, 1))
+        start_time = end_time - relativedelta(months=3)
+        title = "۳ ماه گذشته"
+        
+    sent_msg = query.edit_message_text(text=f"در حال تهیه گزارش {title}...")
+    if sent_msg:
+        sent_messages_info.append({'id': sent_msg.message_id, 'text': sent_msg.text})
+    process_messages_for_clearing(sent_messages_info)
+
+    # حالا تابع اصلی را با حالت (mode) مناسب فراخوانی می‌کنیم
+    if start_time and title:
+        generate_and_send_report(query.message, context, start_time, end_time, title, mode)
+    else:
+        # اگر نوع گزارش تعریف نشده بود
+        context.bot.send_message(chat_id=query.message.chat_id, text="خطا: نوع گزارش تعریف نشده است.")
+
+def generate_and_send_report(message, context, start_time, end_time, title, mode="full"):
     sent_messages_info = [] # <--- لیست محلی برای این تابع
     
     """موتور اصلی برای ساخت و ارسال تمام گزارش‌ها"""
     terminal_info = mt5.terminal_info()
     if not terminal_info or not terminal_info.connected:
         prompt_text = "اسکریپت به متاتریدر متصل نیست. لطفاً چند لحظه دیگر دوباره تلاش کنید."
-        sent_msg = update.message.reply_text(prompt_text)
+        sent_msg = message.reply_text(prompt_text)
         if sent_msg:
             sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
         process_messages_for_clearing(sent_messages_info)
@@ -372,10 +567,12 @@ def generate_and_send_report(update, context, start_time, end_time, title):
     start_date_for_history = end_time - timedelta(days=365 * 5)  # 5 years back
     # در ابتدا کل تاریخچه رو میگیریم بعدا فیلتر میکنیم که توی بازه نشون بده فقط
     deals = mt5.history_deals_get(start_date_for_history, end_time)
+    # --- بخش جدید: گرفتن کل تاریخچه برای محاسبه دراودان ---
+    all_deals_for_drawdown = mt5.history_deals_get(datetime(2000, 1, 1, tzinfo=pytz.utc), end_time)
 
     if not deals:
         prompt_text = f"در بازه زمانی گزارش ({title}) هیچ معامله‌ای یافت نشد."
-        sent_msg = update.message.reply_text(prompt_text)
+        sent_msg = message.reply_text(prompt_text)
         if sent_msg:
             sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
         process_messages_for_clearing(sent_messages_info)
@@ -428,14 +625,15 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         
         if deal.entry == mt5.DEAL_ENTRY_IN:
             positions[position_id]['volume'] += deal.volume
+            # positions[position_id]['close_time'] = deal.time # اگه این فعال کنی و اونو غیر فعال پوزیشنها بر اساس زمان باز شدن مرتب میشن
             # فقط حجم اولین معامله ورودی را به عنوان حجم کل پوزیشن در نظر می‌گیریم
             if positions[position_id]['trade_volume'] == 0:
                 positions[position_id]['trade_volume'] = deal.volume
-        elif deal.entry == mt5.DEAL_ENTRY_OUT:
+        elif deal.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY, mt5.DEAL_ENTRY_INOUT):
             positions[position_id]['volume'] -= deal.volume
             positions[position_id]['close_time'] = deal.time # زمان آخرین خروج ثبت می‌شود
         # --- پایان بخش جدید ---
-        if deal.entry == mt5.DEAL_ENTRY_OUT:
+        if deal.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY, mt5.DEAL_ENTRY_INOUT):
             # closed_trades_count += 1
             total_profit += deal.profit
             # if deal.profit >= 0:
@@ -496,7 +694,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
                     max_profit = pos_data['profit']
             else: # اگر معامله با ضرر بسته شده بود
                 loss_trades_count += 1
-                total_loss_sum += pos_data['profit'] # ضررها منفی هستند،そのままجمع می‌کنیم
+                total_loss_sum += pos_data['profit'] # ضررهایی که منفی هستند،جمع می‌کنیم
                 if pos_data['profit'] < max_loss:
                     max_loss = pos_data['profit']
 
@@ -512,7 +710,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         
     if not report_lines:
         prompt_text = f"در بازه زمانی گزارش ({title}) هیچ پوزیشنی بسته نشده است."
-        sent_msg = update.message.reply_text(prompt_text)
+        sent_msg = message.reply_text(prompt_text)
         if sent_msg:
             sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
         process_messages_for_clearing(sent_messages_info)
@@ -599,7 +797,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             profit_after_period = 0.0
             if deals_after_period:
                 for d in deals_after_period:
-                    if d.entry in (mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT):
+                    if d.entry in (mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY, mt5.DEAL_ENTRY_INOUT):
                         profit_after_period += d.profit + d.commission + d.swap
             # logging.info(f"Profit from deals after the period: {profit_after_period}")
             # بالانس در انتهای بازه = بالانس فعلی - سود معاملات بعدی
@@ -654,12 +852,23 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         growth_line = f"**درصد رشد اکانت(حال):**‎`{total_growth_str}`‏|**درصد رشد بازه:**‎`{period_growth_str}`\n"
         broker_account_line = f"`{account_info.company} | {account_info.login}`\n" if account_info else ""
         
+        # --- بخش جدید: فراخوانی تابع دراودان برای دو حالت ---
+        # فراخوانی برای کل حساب
+        total_drawdown_info = calculate_drawdown_for_period(all_deals_for_drawdown, datetime(2000, 1, 1, tzinfo=pytz.utc), end_time)
+        # فراخوانی برای بازه گزارش
+        period_drawdown_info = calculate_drawdown_for_period(all_deals_for_drawdown, start_time, end_time)
+        drawdown_line = (
+            f"**دراودان کل:** `‎{total_drawdown_info['amount']:.2f}$`‏ | ‎(`{total_drawdown_info['percent']:.2f}%`)\n"
+            f"**دراودان بازه:** `‎{period_drawdown_info['amount']:.2f}$`‏ | ‎(`{period_drawdown_info['percent']:.2f}%`)\n"
+        )
+        
         summary_old = (
         f"**📊 گزارش {title}**\n"
         f"_{start_time.strftime('%Y/%m/%d')} - {display_end_time.strftime('%Y/%m/%d')}_\n\n"
         f"{actual_date_report}"
         f"{balance_equity_line}"
         f"{profit_line}"
+        f"{drawdown_line}"
         f"{growth_line}"
         f"کمیسیون بازه:`‎{commission:.2f}`‏|سواپ بازه:‎`{swap:.2f}`\n"
         f"**نرخ برد بازه:**‎`{win_rate:.2f}%` ‏({win_count}/{closed_trades_count})\n"
@@ -667,6 +876,7 @@ def generate_and_send_report(update, context, start_time, end_time, title):
         f"**معاملات سر به سر:** `{breakeven_count}`\n"
         f"بیشترین س،ض: ‎{max_profit:,.2f}‏|‎{max_loss:,.2f}$\n"
         f"میانگین س،ض: ‎{avg_profit:,.2f}‏|‎{avg_loss:,.2f}$\n"
+        f"میانگین ریوارد: ‎{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}\n"
         f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
         f"{broker_account_line}"
         f"-----------------------------------"
@@ -680,11 +890,13 @@ def generate_and_send_report(update, context, start_time, end_time, title):
             ["اکوئیتی", Not_available, current_equity],# تا اینجا فکر کنم درسته
             ["سود خالص", f"{total_balance_change_period:,.2f}$", f"{true_total_account_profit:,.2f}$"],
             ["رشد", f"{period_growth_str}", f"{total_growth_str}"],
+            ["حداکثر افت حساب", f"(%{period_drawdown_info.get('percent', 0):.2f})${period_drawdown_info.get('amount', 0):.2f}", f"(%{total_drawdown_info.get('percent', 0):.2f})${total_drawdown_info.get('amount', 0):.2f}"],
             ["نرخ برد", f"({win_count}/{closed_trades_count})%{win_rate:.2f}", Not_available],
             ["نرخ برد واقعی", f"({real_win_count}/{real_win_count + real_loss_count})%{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}", Not_available],
             ["سر به سر", f"{breakeven_count}", Not_available],
             ["بیشترین س،ض$", f"{max_loss:.2f},{max_profit:.2f}", Not_available],
             ["میانگین س،ض$", f"{avg_loss:.2f},{avg_profit:.2f}", Not_available],
+            ["میانگین ریوارد", f"{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}", Not_available],
             ["تعداد معامله", f"{closed_trades_count}", Not_available],
             ["کمیسیون", f"{commission:.2f}", Not_available],
             ["سواپ", f"{swap:.2f}", Not_available],
@@ -759,44 +971,44 @@ def generate_and_send_report(update, context, start_time, end_time, title):
 
         # ارسال به تلگرام بدون monospace
         summary = "\n".join(lines)
-        # sent_msg = update.message.reply_text(summary)
+        # sent_msg = message.reply_text(summary)
 
 
-    sent_msg = update.message.reply_text(summary_old, parse_mode='Markdown')
+    sent_msg = message.reply_text(summary_old, parse_mode='Markdown')
     if sent_msg:
         sent_messages_info.append({'id': sent_msg.message_id, 'text': summary_old})
-    sent_msg = update.message.reply_text(summary, parse_mode='Markdown')
+    sent_msg = message.reply_text(summary, parse_mode='Markdown')
     if sent_msg:
         sent_messages_info.append({'id': sent_msg.message_id, 'text': summary})
     time.sleep(1) 
-
-    # --- بخش جدید: اضافه کردن هدر ---
-    prompt_text = f"#N| Symbol | lot   |          Profit | Date"
-    sent_msg = update.message.reply_text(prompt_text, parse_mode='Markdown')
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-
-    CHUNK_SIZE = 40
-    for i in range(0, len(report_lines), CHUNK_SIZE):
-        chunk = report_lines[i:i + CHUNK_SIZE]
-        message_part = "\n".join(chunk)
-        sent_msg = update.message.reply_text(message_part, parse_mode='Markdown')
+    if mode == 'full':
+        # --- بخش جدید: اضافه کردن هدر ---
+        prompt_text = f"#N| Symbol | lot   |          Profit | Date"
+        sent_msg = message.reply_text(prompt_text, parse_mode='Markdown')
         if sent_msg:
-            sent_messages_info.append({'id': sent_msg.message_id, 'text': message_part})
-        time.sleep(1)
+            sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+
+        CHUNK_SIZE = 40
+        for i in range(0, len(report_lines), CHUNK_SIZE):
+            chunk = report_lines[i:i + CHUNK_SIZE]
+            message_part = "\n".join(chunk)
+            sent_msg = message.reply_text(message_part, parse_mode='Markdown')
+            if sent_msg:
+                sent_messages_info.append({'id': sent_msg.message_id, 'text': message_part})
+            time.sleep(1)
 
     # ساخت لیست تمیز از پوزیشن‌های نهایی برای ارسال به تابع نمودار
     fully_closed_positions = [pos_data for position_id, pos_data in sorted_positions]
     # فراخوانی تابع برای ساخت و ارسال نمودار
-    create_and_send_growth_chart(update, context, fully_closed_positions, starting_balance_period, title)   
+    create_and_send_growth_chart(message, context, fully_closed_positions, starting_balance_period, title)   
     prompt_text = "End report.\nmonitoring continue..."
-    sent_msg = update.message.reply_text(prompt_text)
+    sent_msg = message.reply_text(prompt_text)
     if sent_msg:
         sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
     process_messages_for_clearing(sent_messages_info)
     
 # ====================== رسم نمودار رشد ======================
-def create_and_send_growth_chart(update, context, fully_closed_positions, starting_balance, title):
+def create_and_send_growth_chart(message, context, fully_closed_positions, starting_balance, title):
     sent_messages_info = []
     """نمودار رشد حساب را ساخته و به تلگرام ارسال می‌کند."""
     logging.info("Creating growth chart...")
@@ -831,7 +1043,7 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     if not closed_deals:
         logging.warning("No closing deals to chart.")
         prompt_text = "در بازه زمانی گزارش هیچ پوزیشنی بسته نشده است."
-        sent_msg = update.message.reply_text(prompt_text)
+        sent_msg = message.reply_text(prompt_text)
         if sent_msg:
             sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
         process_messages_for_clearing(sent_messages_info)
@@ -852,12 +1064,12 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     if len(trade_numbers) < 4:
         logging.warning("Not enough data to create a chart.")
         prompt_text = "تعداد معاملات برای رسم نمودار کافی نیست."
-        sent_msg = update.message.reply_text(prompt_text)
+        sent_msg = message.reply_text(prompt_text)
         if sent_msg:
             sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
         process_messages_for_clearing(sent_messages_info)
         # در صورت تمایل می‌توانید یک پیام مناسب به کاربر تلگرام بفرستید
-        # sent_msg = update.message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
+        # sent_msg = message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
         return # از ادامه تابع و بروز خطا جلوگیری می‌کند
     
     # ۲. رسم نمودار با خطوط منحنی و نرم
@@ -906,7 +1118,7 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     
     # محور افقی (تعداد معاملات) را طوری تنظیم کن که حداکثر 100 عدد صحیح نمایش دهد
     ax.xaxis.set_major_locator(MaxNLocator(nbins=100, integer=True))
-    plt.xticks(fontname='calibri', fontsize=6)
+    plt.xticks(fontname='calibri', fontsize=6, rotation=80)
     # --- تغییر کلیدی: تنظیم نقطه شروع محور افقی ---
     plt.xlim(left=0) # محور افقی را مجبور کن که از صفر شروع شود
 
@@ -929,7 +1141,7 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
     
     # ۴. ارسال تصویر به تلگرام
     logging.info("Sending chart to Telegram...")
-    send_msg = update.message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
+    send_msg = message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
     if send_msg:
         sent_messages_info.append({'id': send_msg.message_id, 'text': f"نمودار رشد: {title}"})
     # بستن نمودار برای آزاد کردن حافظه
@@ -941,189 +1153,187 @@ def create_and_send_growth_chart(update, context, fully_closed_positions, starti
 
 # ============================================== گزارش روزانه ===========================================================
 def _24H_report(update, context):
-        # ۱. متن پیام را در یک متغیر با نام مشخص قرار دهید
-    sent_messages_info = []        
-    prompt_text = "در حال تهیه گزارش 24 ساعته گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    end_time = get_server_time()
-    start_time = end_time - timedelta(hours=24)
-    process_messages_for_clearing(sent_messages_info)
-    generate_and_send_report(update, context, start_time, end_time, "۲۴ ساعت گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='time_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='time_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def _3days_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۳ روز گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=3), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    process_messages_for_clearing(sent_messages_info)
-    generate_and_send_report(update, context, start_time, end_time, "۳ روز گذشته")
-    
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='3days_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='3days_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
+ 
 def _7day_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۷ روز گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-
-    # محاسبه بازه زمانی ۷ روز گذشته
-    end_time = get_server_time()
-    # end_time = datetime.now() # یا get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=7), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    process_messages_for_clearing(sent_messages_info)
-    # فراخوانی موتور اصلی گزارش‌ساز
-    generate_and_send_report(update, context, start_time, end_time, "۷ روز گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='7day_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='7day_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def _14day_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۱۴ روز گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-
-    # محاسبه بازه زمانی ۱۴ روز گذشته
-    end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=14), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    process_messages_for_clearing(sent_messages_info)
-    # فراخوانی موتور اصلی گزارش‌ساز
-    generate_and_send_report(update, context, start_time, end_time, "۱۴ روز گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='14day_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='14day_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def _30day_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۳۰ روز گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-
-    # محاسبه بازه زمانی ۳۰ روز گذشته
-    end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=30), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    process_messages_for_clearing(sent_messages_info)
-    # فراخوانی موتور اصلی گزارش‌ساز
-    generate_and_send_report(update, context, start_time, end_time, "۳۰ روز گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='30day_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='30day_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def _60day_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۶۰ روز گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-
-    # محاسبه بازه زمانی ۶۰ روز گذشته
-    end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=60), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    process_messages_for_clearing(sent_messages_info)
-    # فراخوانی موتور اصلی گزارش‌ساز
-    generate_and_send_report(update, context, start_time, end_time, "۶۰ روز گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='60day_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='60day_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def _90day_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۹۰ روز گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-
-    # محاسبه بازه زمانی ۹۰ روز گذشته
-    end_time = get_server_time()
-    naive_start_time = datetime.combine(end_time.date() - timedelta(days=90), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    process_messages_for_clearing(sent_messages_info)
-    # فراخوانی موتور اصلی گزارش‌ساز
-    generate_and_send_report(update, context, start_time, end_time, "۹۰ روز گذشته") 
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='90day_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='90day_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup) 
     
 #--------------------توابع گزارش‌گیری بر اساس هفته و ماه--------------------
 def today_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش امروز..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='today_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='today_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
-    server_now = get_server_time()
-    naive_start_time = datetime.combine(server_now.date(), datetime.min.time())
-    start_time = make_aware(naive_start_time)
-    end_time = server_now
-    process_messages_for_clearing(sent_messages_info)
-    # logging.info(f"Start time: {start_time}, End time: {end_time}")
-    generate_and_send_report(update, context, start_time, end_time, "امروز")
+def yesterday_report(update, context):
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='yesterday_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='yesterday_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
     
 def last_week_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش هفته گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    today = get_server_time().date()
-    # پیدا کردن شنبه هفته جاری
-    last_saturday = today + relativedelta(weekday=SA(-1))
-    
-    naive_end_time = datetime.combine(last_saturday, datetime.min.time())
-    end_time = make_aware(naive_end_time)
-    start_time = end_time - timedelta(days=7)
-    process_messages_for_clearing(sent_messages_info)
-    generate_and_send_report(update, context, start_time, end_time, "هفته گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='lastweek_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='lastweek_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def last_2_weeks_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۲ هفته گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    today = get_server_time().date()
-    last_saturday = today + relativedelta(weekday=SA(-1))
-    naive_end_time = datetime.combine(last_saturday, datetime.min.time())
-    end_time = make_aware(naive_end_time)
-    start_time = end_time - timedelta(days=14)
-    process_messages_for_clearing(sent_messages_info)
-    generate_and_send_report(update, context, start_time, end_time, "دو هفته گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='last2weeks_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='last2weeks_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def last_month_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ماه گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    today = get_server_time().date()
-    naive_end_time = datetime(today.year, today.month, 1)
-    end_time = make_aware(naive_end_time)
-    start_time = end_time - relativedelta(months=1)
-    process_messages_for_clearing(sent_messages_info)    
-    generate_and_send_report(update, context, start_time, end_time, "ماه گذشته")
-
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='lastmonth_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='lastmonth_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
+    
 def last_2_months_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۲ ماه گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    today = get_server_time().date()
-    naive_end_time = datetime(today.year, today.month, 1)
-    end_time = make_aware(naive_end_time)
-    start_time = end_time - relativedelta(months=2)
-    process_messages_for_clearing(sent_messages_info)
-    generate_and_send_report(update, context, start_time, end_time, "دو ماه گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='last2months_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='last2months_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
 
 def last_3_months_report(update, context):
-    sent_messages_info = []
-    prompt_text = "در حال تهیه گزارش ۳ ماه گذشته..."
-    sent_msg = update.message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({'id': sent_msg.message_id, 'text': prompt_text})
-    today = get_server_time().date()
-    naive_end_time = datetime(today.year, today.month, 1)
-    end_time = make_aware(naive_end_time)
-    start_time = end_time - relativedelta(months=3)
-    process_messages_for_clearing(sent_messages_info)
-    generate_and_send_report(update, context, start_time, end_time, "سه ماه گذشته")
+    keyboard = [
+        [
+            InlineKeyboardButton("📄 با جزئیات", callback_data='last3months_full'),
+            InlineKeyboardButton("📈 فقط نمودار", callback_data='last3months_chart_only'),
+        ],
+        [
+            InlineKeyboardButton("❌ لغو", callback_data='cancel_operation') # <-- این ردیف جدید را اضافه کنید
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('لطفاً نوع گزارش را انتخاب کنید:', reply_markup=reply_markup)
      
 # ====================== توابع قالب‌بندی پیام‌ها ======================
 def format_pending_order_filled(deal, order):
@@ -1312,7 +1522,7 @@ def clear_alerts(update, context):
     update.message.reply_text(confirmation_message)
     
     remaining_count = len(alert_message_ids)
-    logging.info(f"Deleted:{deleted_count}, F Permn:{failed_permanently_count}, F Tempo:{failed_temporarily_count}, Remaining:{remaining_count}.")
+    logging.info(f"Del:{deleted_count},FP:{failed_permanently_count},FT:{failed_temporarily_count},R:{remaining_count}.")
 
 def process_messages_for_clearing(sent_messages_info):
     """
@@ -1354,7 +1564,19 @@ def main():
                 fallbacks=[CommandHandler('cancel', cancel_conversation)],
             )
             
+            # v-- این بلوک کد جدید را اینجا اضافه کنید --v
+            single_day_conv_handler = ConversationHandler(
+                entry_points=[CommandHandler('day_report', single_day_report_start)],
+                states={
+                    GET_SINGLE_DATE: [MessageHandler(Filters.text & ~Filters.command, received_single_date)],
+                },
+                fallbacks=[CommandHandler('cancel', cancel_conversation)],
+            )
+            # ^-- پایان بلوک کد جدید --^
+            
             dispatcher.add_handler(conv_handler)
+            dispatcher.add_handler(single_day_conv_handler)
+            dispatcher.add_handler(CallbackQueryHandler(report_button_handler))
             dispatcher.add_handler(CommandHandler("clear", clear_alerts))
             dispatcher.add_handler(CommandHandler("time", _24H_report))
             dispatcher.add_handler(CommandHandler("3days", _3days_report))
@@ -1364,6 +1586,7 @@ def main():
             dispatcher.add_handler(CommandHandler("60day", _60day_report))
             dispatcher.add_handler(CommandHandler("90day", _90day_report))
             dispatcher.add_handler(CommandHandler("today", today_report))
+            dispatcher.add_handler(CommandHandler("yesterday", yesterday_report))
             dispatcher.add_handler(CommandHandler("lastweek", last_week_report))
             dispatcher.add_handler(CommandHandler("last2weeks", last_2_weeks_report))
             dispatcher.add_handler(CommandHandler("lastmonth", last_month_report))
@@ -1431,7 +1654,7 @@ def main():
                                 msg = format_pending_order_filled(deal, order[0])
                                 send_telegram(msg)
                         
-                        elif deal.entry == mt5.DEAL_ENTRY_OUT:
+                        elif deal.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY, mt5.DEAL_ENTRY_INOUT):
                             original_comment = ""
                             initial_volume = 0.0 # متغیر جدید برای حجم اولیه
                             # --- بخش جدید: محاسبه حجم کل بسته شده ---
@@ -1457,7 +1680,7 @@ def main():
                                             original_comment = opening_order[0].comment
                                             
                                     # جمع زدن حجم تمام معاملات خروجی
-                                    if opening_deal.entry == mt5.DEAL_ENTRY_OUT and opening_deal.time_msc <= deal.time_msc:
+                                    if opening_deal.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY, mt5.DEAL_ENTRY_INOUT) and opening_deal.time_msc <= deal.time_msc:
                                         total_closed_volume += opening_deal.volume
                                         # سود تمام معاملات خروجی را جمع می‌زنیم
                                         total_position_profit += opening_deal.profit# + opening_deal.commission + opening_deal.swap
@@ -1602,5 +1825,3 @@ if __name__ == "__main__":
     if mt5.terminal_info():
         mt5.shutdown()
     logging.info("Script exited gracefully.")
-
-
