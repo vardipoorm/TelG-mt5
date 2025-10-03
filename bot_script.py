@@ -25,7 +25,7 @@ from telegram.ext import Updater, CommandHandler # تغییر ضروری: کتا
 from telegram.ext import ConversationHandler, MessageHandler, Filters # کتابخانه تاریخ دستی
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
-# تا اینجا بجز سفارشی درست شده
+# تا اینجا بجز سفارشی دکمه براش درست شده
 
 # ====================== ساکت کردن گزارشگرهای پیش‌فرض تلگرام ======================
 # این بخش گزارش‌های خطای شبکه‌ای پیش‌فرض کتابخانه تلگرام و وابستگی‌های آن را غیرفعال می‌کند
@@ -71,8 +71,52 @@ def determine_broker_timezone():
     if not mt5.initialize(path=MT5_PATH):
         logging.error("Could not connect to MT5 to determine timezone.")
         return None
+    PRIORITY_BASE_SYMBOLS = ["BTCUSD", "XAUUSD"]
+    # 2. دریافت لیست تمام نمادهای موجود در سرور
+    # این لیست برای پیدا کردن پسوندها ضروری است.
+    all_symbols_on_server = mt5.symbols_get()
+    selected_full_symbol = None
+    for base_symbol in PRIORITY_BASE_SYMBOLS:
+        
+        # 3. پیدا کردن نماد کامل (شامل پسوند)
+        # این بخش نمادی مثل "XAUUSD.pe" یا "BTCUSD" (بدون پسوند) را پیدا می‌کند
+        matching_symbols = [
+            s.name for s in all_symbols_on_server 
+            if s.name.startswith(base_symbol)
+        ]
+        
+        if matching_symbols:
+            # اولین نماد تطابق داده شده را انتخاب می‌کنیم (معمولاً درست‌ترین است)
+            full_symbol = matching_symbols[0] 
+            # print(f"trying {full_symbol}...")
+            # سعی در اضافه کردن نماد به واچ‌لیست
+            # 💡 فعال کردن نماد در واچ‌لیست
+            while True:
+                if not mt5.symbol_select(full_symbol, True):
+                    while True:
+                        if not mt5.initialize(path=MT5_PATH):
+                            logging.error("mt5 not initialized, retrying...")
+                            time.sleep(RECONNECT_DELAY)           
+                        else:
+                            break
+                    logging.error(f"⚠️ can't add {full_symbol} to watchlist, error code: {mt5.last_error()}")
+                    time.sleep(0.5)  # صبر کن و دوباره تلاش کن
+                else:   
+                    time.sleep(1)# صبر کن تا سرور به‌روزرسانی کند   
+                    try: 
+                        # 4. سعی در گرفتن آخرین تیک نماد کامل
+                        last_tick = mt5.symbol_info_tick(full_symbol)
+                    except Exception as e:
+                        logging.error(f"⚠️ Error retrieving tick for {full_symbol}: {e}")
+                        continue
+                    break  # موفق شدیم، از حلقه خارج می‌شویم
 
-    server_tick = mt5.symbol_info_tick("BTCUSD")
+            # last_tick = mt5.symbol_info_tick(full_symbol)
+            if last_tick and last_tick.time > 0:
+                selected_full_symbol = full_symbol
+                break # نماد را پیدا کردیم، از حلقه خارج می‌شویم
+
+    server_tick = mt5.symbol_info_tick(selected_full_symbol)
     if not server_tick or server_tick.time == 0:
         logging.error("Could not get server time from tick.")
         # mt5.shutdown()
@@ -108,7 +152,7 @@ CHAT_ID =
 START_DATE, END_DATE = range(2)
 GET_SINGLE_DATE = range(1)
 # +++ کد جدید +++
-# لیستی برای ذخیره شناسه‌های پیام‌های هشدار جهت حذف در آینده
+# لیستی برای ذخیره شناسه‌های پیام‌های هشدار جهت جلوگیری از حذف با دستور
 KEYWORDS_TO_KEEP = [
     "Position Closed", 
     "Order Filled",
@@ -768,7 +812,7 @@ def generate_and_send_report(message, context, start_time, end_time, title, mode
             starting_balance_period = account_info.balance - total_balance_change_period
             actual_trading_days_count = len(active_trading_days_set)
             actual_date_report = f"اولین ترید(روز معاملاتی): ‎{first_trade_date_str}‏ ({str(actual_trading_days_count)})\n" if actual_trading_days_count > 1 else ""
-            
+
             for position_id, pos_data in sorted_positions:
                 # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
                 if abs(pos_data['volume']) < 0.01 and pos_data['close_time'] > 0:
@@ -787,8 +831,7 @@ def generate_and_send_report(message, context, start_time, end_time, title, mode
             balance_equity_line = f"**موجودی ابتدای بازه:**`‎{starting_balance_period:,.2f}`‏\n**موجودی(حال):**‎`{account_info.balance:>8.2f}`**|اکوییتی(حال):**`{account_info.equity:,.2f}`\n" if account_info else ""
             current_balance = f"{account_info.balance:,.2f}"
             current_equity = f"{account_info.equity:,.2f}" if account_info else Not_available
-            display_end_time = end_time
-            
+            display_end_time = end_time  
         else:
             logging.info("Generating historical report...")
             # این یک گزارش تاریخ خاص است، از فرمول پیچیده‌تر استفاده کن
@@ -861,6 +904,8 @@ def generate_and_send_report(message, context, start_time, end_time, title, mode
             f"**دراودان کل:** `‎{total_drawdown_info['amount']:.2f}$`‏ | ‎(`{total_drawdown_info['percent']:.2f}%`)\n"
             f"**دراودان بازه:** `‎{period_drawdown_info['amount']:.2f}$`‏ | ‎(`{period_drawdown_info['percent']:.2f}%`)\n"
         )
+        reward_ratio = (avg_profit / abs(avg_loss)) if avg_loss != 0 else None
+        reward_ratio_str = f"{reward_ratio:.2f}" if reward_ratio is not None else "---" 
         
         summary_old = (
         f"**📊 گزارش {title}**\n"
@@ -876,12 +921,13 @@ def generate_and_send_report(message, context, start_time, end_time, title, mode
         f"**معاملات سر به سر:** `{breakeven_count}`\n"
         f"بیشترین س،ض: ‎{max_profit:,.2f}‏|‎{max_loss:,.2f}$\n"
         f"میانگین س،ض: ‎{avg_profit:,.2f}‏|‎{avg_loss:,.2f}$\n"
-        f"میانگین ریوارد: ‎{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}\n"
+        # f"میانگین ریوارد: ‎{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}\n"  
+        f"میانگین ریوارد: ‎{reward_ratio_str}\n" 
         f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
         f"{broker_account_line}"
         f"-----------------------------------"
         )
-
+        
         # داده‌های جدول
         rows = [
             ["شاخص", "بازه", "اکنون"],
@@ -896,7 +942,7 @@ def generate_and_send_report(message, context, start_time, end_time, title, mode
             ["سر به سر", f"{breakeven_count}", Not_available],
             ["بیشترین س،ض$", f"{max_loss:.2f},{max_profit:.2f}", Not_available],
             ["میانگین س،ض$", f"{avg_loss:.2f},{avg_profit:.2f}", Not_available],
-            ["میانگین ریوارد", f"{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}", Not_available],
+            ["میانگین ریوارد", f"{reward_ratio_str}", Not_available],
             ["تعداد معامله", f"{closed_trades_count}", Not_available],
             ["کمیسیون", f"{commission:.2f}", Not_available],
             ["سواپ", f"{swap:.2f}", Not_available],
@@ -940,7 +986,6 @@ def generate_and_send_report(message, context, start_time, end_time, title, mode
             col2 = format_number(str(row[1]), col_widths[1])
             col3 = format_number(str(row[2]), col_widths[2])
             return f"`{col1}|{col2}|{col3}`"
-        
         def make_title_line(title, total_width, sep_char="-"):
             # طول متن عنوان با فاصله‌های قبل و بعد
             title_text = f" {title} "
@@ -1449,13 +1494,77 @@ def get_order_type_str(order):
     return type_map.get(order.type, "Pending")
 
 def get_server_time():
-    """زمان سرور بروکر را با منطقه زمانی صحیح برمی‌گرداند."""
-    last_tick = mt5.symbol_info_tick("BTCUSD")
-    if last_tick and last_tick.time > 0:
+#     """زمان سرور بروکر را با منطقه زمانی صحیح برمی‌گرداند."""
+#     last_tick = mt5.symbol_info_tick("BTCUSD")
+#     if last_tick and last_tick.time > 0:
+#         utc_time = datetime.fromtimestamp(last_tick.time, tz=pytz.utc)
+#         broker_tz = pytz.timezone(BROKER_TIMEZONE)
+#         return utc_time.astimezone(broker_tz)
+#     else:
+#         return None
+    
+# def get_server_time():
+    PRIORITY_BASE_SYMBOLS = ["BTCUSD", "XAUUSD"]
+    
+    # 2. دریافت لیست تمام نمادهای موجود در سرور
+    # این لیست برای پیدا کردن پسوندها ضروری است.
+    all_symbols_on_server = mt5.symbols_get()
+    
+    selected_full_symbol = None
+    
+    for base_symbol in PRIORITY_BASE_SYMBOLS:
+        
+        # 3. پیدا کردن نماد کامل (شامل پسوند)
+        # این بخش نمادی مثل "XAUUSD.pe" یا "BTCUSD" (بدون پسوند) را پیدا می‌کند
+        matching_symbols = [
+            s.name for s in all_symbols_on_server 
+            if s.name.startswith(base_symbol)
+        ]
+        
+        if matching_symbols:
+            # اولین نماد تطابق داده شده را انتخاب می‌کنیم (معمولاً درست‌ترین است)
+            full_symbol = matching_symbols[0] 
+            last_tick = None
+            # logging.info(f"trying: {full_symbol}...")
+            # 💡 فعال کردن نماد در واچ‌لیست
+            while True:
+                if not mt5.symbol_select(full_symbol, True):
+                    while True:
+                        if not mt5.initialize(path=MT5_PATH):
+                            logging.error("mt5 not initialized, retrying...")
+                            time.sleep(RECONNECT_DELAY)           
+                        else:
+                            break
+                    logging.error(f"⚠️ can't add {full_symbol} to watchlist, error code: {mt5.last_error()}")
+                    time.sleep(0.5)  # صبر کن و دوباره تلاش کن
+                else:   
+                    time.sleep(1)# صبر کن تا سرور به‌روزرسانی کند   
+                    try: 
+                        # 4. سعی در گرفتن آخرین تیک نماد کامل
+                        last_tick = mt5.symbol_info_tick(full_symbol)
+                    except Exception as e:
+                        logging.error(f"⚠️ Error retrieving tick for {full_symbol}: {e}")
+                        continue
+                    break  # موفق شدیم، از حلقه خارج می‌شویم
+            
+            if last_tick and last_tick.time > 0:
+                selected_full_symbol = full_symbol
+                break # نماد را پیدا کردیم، از حلقه خارج می‌شویم
+
+    # --- بخش اجرای نهایی در صورت پیدا شدن نماد ---
+    if selected_full_symbol:
+        # 6. محاسبه و برگرداندن زمان
         utc_time = datetime.fromtimestamp(last_tick.time, tz=pytz.utc)
-        broker_tz = pytz.timezone(BROKER_TIMEZONE)
+        try:
+            broker_tz = pytz.timezone(BROKER_TIMEZONE)
+        except NameError:
+            logging.error("❌ BROKER_TIMEZONE is not defined.")
+            return None
+            
         return utc_time.astimezone(broker_tz)
+    # --- بخش مدیریت خطا در صورت عدم موفقیت ---
     else:
+        logging.error("❌ Failed to retrieve server time using either BTCUSD or XAUUSD.")
         return None
     
 def make_aware(dt):
@@ -1825,3 +1934,5 @@ if __name__ == "__main__":
     if mt5.terminal_info():
         mt5.shutdown()
     logging.info("Script exited gracefully.")
+
+
