@@ -89,8 +89,7 @@ pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
 <img width="622" height="402" alt="image" src="https://github.com/user-attachments/assets/4cec7ca0-9387-4d84-8e45-ae4106470088" />
 
 ## اجرای اسکریپت
-
-مطمئن بشید نماد BTCUSD در واچ لیست نمایش داده میشه که اسکریپت ارور نده اگر هم نماد رو در بروکرتون نداشتید، توی اسکریپت سرچ کنید BTCUSD بعد با نماد خودتون مثلا XAUUSD جایگذین کنید و سیو کنید. 
+ 
 
 پس از نصب و تنظیم، فایل زیر را اجرا کنید:
 
