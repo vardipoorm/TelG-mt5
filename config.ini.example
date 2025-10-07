@@ -1,13 +1,6 @@
-# config.ini.example
-# *****************************************************************
-# توجه: قبل از اجرای اسکریپت، نام این فایل را به config.ini تغییر دهید
-# و مقادیر واقعی خود را در آن وارد کنید.
-# *****************************************************************
-
 [telegram]
 TOKEN = YOUR_TELEGRAM_BOT_TOKEN_HERE
-CHAT_ID = YOUR_CHAT_ID_HERE # مثال: 1234567890
+CHAT_ID = YOUR_CHAT_ID_HERE
 
 [mt5]
-# مسیر کامل فایل terminal64.exe متاتریدر شما
 MT5_PATH = C:\Path\To\MetaTrader 5\terminal64.exe
