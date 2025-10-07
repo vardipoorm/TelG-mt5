@@ -81,7 +81,7 @@ pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
 ### قدم سوم: تنظیمات اسکریپت
 راهنمای پیکربندی:
 
-۱. فایل config.ini.example را به config.ini تغییر نام دهید.
+۱. فایل config.ini.example را به config.ini تغییر نام دهید و آن را باز کنید.
 
 ۲. مقادیر TOKEN، CHAT_ID و MT5_PATH را با اطلاعات واقعی خود جایگزین کنید.
     
