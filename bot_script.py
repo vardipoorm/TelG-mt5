@@ -200,7 +200,7 @@ RETRY_COUNT = 2000
 RETRY_DELAY = 2
 
 # --- مسیر متاتریدر خاص ---
-MT5_PATH = "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+MT5_PATH = MT5_PATH # مسیر کامل فایل terminal64.exe متاتریدر شما
 BROKER_TIMEZONE = None
 # --- آستانه برای محاسبه وین ریت واقعی ---
 WINRATE_THRESHOLD_PERCENT = 0.05 # 0.05% of starting balance

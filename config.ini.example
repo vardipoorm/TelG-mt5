@@ -9,4 +9,5 @@ TOKEN = YOUR_TELEGRAM_BOT_TOKEN_HERE
 CHAT_ID = YOUR_CHAT_ID_HERE # مثال: 1234567890
 
 [mt5]
+# مسیر کامل فایل terminal64.exe متاتریدر شما
 MT5_PATH = C:\Path\To\MetaTrader 5\terminal64.exe
