@@ -86,7 +86,7 @@ pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
 ۲. مقادیر TOKEN، CHAT_ID و MT5_PATH را با اطلاعات واقعی خود جایگزین کنید.
     
  **نحوه پیدا کردن مسیر MT5_PATH:** روی شورتکات متاتریدر راست کلیک کرده، `Properties` را انتخاب و متن داخل فیلد `Target` را کپی کنید.
- ```
+ 
 ## حالا به متاتریدر بروید و توی تنظیمات این تیک رو بزنید.
 
 <img width="622" height="402" alt="image" src="https://github.com/user-attachments/assets/4cec7ca0-9387-4d84-8e45-ae4106470088" />
