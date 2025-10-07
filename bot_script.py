@@ -16,6 +16,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import io
+import configparser
 from datetime import date
 from dateutil.relativedelta import relativedelta, SA # برای پیدا کردن شنبه
 from telegram import Bot
@@ -144,9 +145,34 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
-TOKEN = ""
+# یک نمونه از ConfigParser می‌سازیم
+config = configparser.ConfigParser()
 
-CHAT_ID = 
+# مسیر فایل config.ini رو چک می‌کنیم
+config_file = 'config.ini'
+if not os.path.exists(config_file):
+    print(f"config file '{config_file}' not found.")
+    # می‌توانید در اینجا برنامه را متوقف کنید یا از مقادیر پیش‌فرض استفاده کنید
+else:
+    # فایل config.ini رو می‌خونیم
+    config.read(config_file)
+
+    # مقادیر رو از بخش‌های مختلف می‌گیریم
+    try:
+        TOKEN = config.get('telegram', 'TOKEN')
+        CHAT_ID = config.getint('telegram', 'CHAT_ID') # اگر عدد هست، بهتره با getint بخونید
+        MT5_PATH = config.get('mt5', 'MT5_PATH')
+    except configparser.Error as e:
+        print(f"read config file erroe {e}")
+        # مدیریت خطا: مقادیر رو None یا مقدار پیش‌فرض قرار بدید
+
+# حالا می‌تونید از متغیرهای TOKEN، CHAT_ID و MT5_PATH در ادامه‌ی کد استفاده کنید.
+print(f"token: {TOKEN[:5]}...") # برای تست، بخشی از توکن رو چاپ کنید
+print(f"chat_id: {CHAT_ID}")
+print(f"MT5_path: {MT5_PATH}")
+
+TOKEN = TOKEN
+CHAT_ID = CHAT_ID
 
 # --- مراحل مکالمه برای گزارش سفارشی ---
 START_DATE, END_DATE = range(2)
