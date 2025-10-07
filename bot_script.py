@@ -145,17 +145,23 @@ def determine_broker_timezone():
     return timezone_str
 
 # ========================= تنظیمات اصلی =========================
+# مسیر فایلی که در حال اجرای آن هستیم (مسیر خود اسکریپت پایتون)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# مسیر مطلق فایل config.ini را با پیوستن مسیر اسکریپت و نام فایل می‌سازیم
+config_file_path = os.path.join(script_dir, 'config.ini')
+
 # یک نمونه از ConfigParser می‌سازیم
 config = configparser.ConfigParser()
 
 # مسیر فایل config.ini رو چک می‌کنیم
-config_file = 'config.ini'
-if not os.path.exists(config_file):
-    print(f"config file '{config_file}' not found.")
+if not os.path.exists(config_file_path):
+    log.error(f"config file '{config_file_path}' not found please read README file.")
+    exit()
     # می‌توانید در اینجا برنامه را متوقف کنید یا از مقادیر پیش‌فرض استفاده کنید
 else:
     # فایل config.ini رو می‌خونیم
-    config.read(config_file)
+    config.read(config_file_path)
 
     # مقادیر رو از بخش‌های مختلف می‌گیریم
     try:
@@ -163,13 +169,13 @@ else:
         CHAT_ID = config.getint('telegram', 'CHAT_ID') # اگر عدد هست، بهتره با getint بخونید
         MT5_PATH = config.get('mt5', 'MT5_PATH')
     except configparser.Error as e:
-        print(f"read config file erroe {e}")
+        log.error(f"read config file error {e}")
         # مدیریت خطا: مقادیر رو None یا مقدار پیش‌فرض قرار بدید
 
 # حالا می‌تونید از متغیرهای TOKEN، CHAT_ID و MT5_PATH در ادامه‌ی کد استفاده کنید.
-print(f"token: {TOKEN[:5]}...") # برای تست، بخشی از توکن رو چاپ کنید
-print(f"chat_id: {CHAT_ID}")
-print(f"MT5_path: {MT5_PATH}")
+log.info(f"token: {TOKEN[:5]}...") # برای تست، بخشی از توکن رو چاپ کنید
+log.info(f"chat_id: {CHAT_ID}")
+log.info(f"MT5_path: {MT5_PATH}")
 
 TOKEN = TOKEN
 CHAT_ID = CHAT_ID
