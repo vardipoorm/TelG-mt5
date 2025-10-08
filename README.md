@@ -97,7 +97,7 @@ pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil
 پس از نصب و تنظیم، فایل زیر را اجرا کنید:
 
 ```bash
-run python mt5-telegram.bat
+TelG-mt5.bat
 ```
 
 پس از اجرا، اسکریپت به صورت خودکار به متاتریدر و تلگرام متصل شده و شروع به کار می‌کند.
