@@ -113,6 +113,9 @@ TelG-mt5.bat
 
 <img width="622" height="402" alt="image" src="https://github.com/user-attachments/assets/a643e93a-aa28-4cab-93a6-b5fd16c5e038" />
 
+<img width="858" height="554" alt="image" src="https://github.com/user-attachments/assets/1c9f63f2-96cd-46a8-99e2-4217d5d77cc2" />
+
+**تنظیمات اکسپرت**: اکسپرت رو میتونید روی چندین چارت و چندین نماد اجرا کنید اما در تنظیمات اکسپرت، برای یکی از اکسپرت ها گزینه ی `master` را `true` کنید و باقی `false`
 ## نحوه استفاده
 
   * **مانیتورینگ لحظه‌ای:** ربات به صورت خودکار باز و بسته شدن پوزیشن‌ها را به شما اطلاع می‌دهد.
