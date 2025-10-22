@@ -37,6 +37,9 @@ UQDCMQm4IiKfkbK7knZnDiIJ4zqzBkmx7ozJDk1Uk6OQrNHG
 clear - پاکسازی پیامهای غیرضرور
 custom_report - گزارش تاریخ دستی
 day_report - گزارش روز خاص
+today - گزارش روز جاری
+thisweek - گزارش هفته ی جاری
+thismonth - گزارش ماه جاری
 time - گزارش 24 ساعت گذشته
 3days - گزارش سه روز گذشته
 7day - گزارش 7 روز گذشته
@@ -44,7 +47,6 @@ time - گزارش 24 ساعت گذشته
 30day - گزارش 30 روز گذشته
 60day - گزارش 60 روز گذشته
 90day - گزارش 90 روز گذشته
-today - گزارش امروز
 yesterday - گزارش دیروز
 lastweek - گزارش هفته ی گذشته
 last2weeks - گزارش دو هفته ی گذشته
