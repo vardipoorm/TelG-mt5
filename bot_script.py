@@ -1,10 +1,21 @@
 import MetaTrader5 as mt5
 import time
 import logging
+import tkinter as tk
+
+# from tkinter import ttk
 import os
 import colorlog
 import pytz
 import sqlite3
+import asyncio
+import aiosmtpd
+from aiosmtpd.smtp import SMTP as BaseSMTP
+from aiosmtpd.controller import Controller
+
+# import email
+from email import policy
+from email.parser import BytesParser
 from flask import Flask, request
 import threading
 import arabic_reshaper
@@ -12,13 +23,15 @@ from bidi.algorithm import get_display
 import numpy as np
 from scipy.interpolate import make_interp_spline
 import matplotlib
+from contextlib import contextmanager
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import io
 import configparser
-from datetime import date
+
+# from datetime import date
 from dateutil.relativedelta import relativedelta, SA  # برای پیدا کردن شنبه
 from telegram import Bot
 from telegram.error import BadRequest, NetworkError
@@ -73,6 +86,492 @@ logging.getLogger("telegram.vendor.ptb_urllib3.urllib3.connectionpool").setLevel
     logging.CRITICAL
 )
 logging.getLogger("telegram.ext.updater").setLevel(logging.CRITICAL)
+
+
+# ... در هر کجای کد که می‌خواهید وضعیت نخ‌ها را ببینید:
+def check_active_threads():
+    active_threads = threading.enumerate()
+    logging.info(f"Total active threads: {len(active_threads)}")
+    for thread in active_threads:
+        # thread.name نام نخ را برمی‌گرداند (اگر در هنگام ساخت نامگذاری شده باشد)
+        # thread.daemon نشان می‌دهد که آیا نخ از نوع Daemon است یا خیر
+        logging.info(
+            f"  - Thread Name: {thread.name}, Is Daemon: {thread.daemon}, Status: {'Alive' if thread.is_alive() else 'Dead'}"
+        )
+
+
+# ====================== کلاس پنجره شناور سود ======================
+
+
+def log_memory_usage(operation_name=""):
+    """لاگ کردن استفاده از حافظه برای مانیتورینگ"""
+    import psutil
+    import os
+
+    process = psutil.Process(os.getpid())
+    memory_mb = process.memory_info().rss / 1024 / 1024
+
+    if operation_name:
+        logging.info(f"🧠 Memory after {operation_name}: {memory_mb:.2f} MB")
+    else:
+        logging.info(f"🧠 Current memory: {memory_mb:.2f} MB")
+
+    return memory_mb
+
+
+# استفاده در نقاط مختلف:
+# log_memory_usage("generating report")
+# log_memory_usage("closing floating window")
+
+
+class FloatingProfitWindow:
+    def __init__(self):
+        self.is_monitoring = False
+        self.monitor_thread = None
+        self.is_running = False  # 🔑 وضعیت کلی نخ GUI (فقط یک بار True می‌شود)
+        self.check_interval = 1  # چک هر 1 ثانیه
+        self.root = None
+        self.label = None
+        self.gui_thread = None
+        self.last_profit = 0
+        self.is_visible = False  # 🔑 وضعیت را به False تغییر می‌دهیم
+        # 🔑 مخفی کردن اولیه: پنجره در ابتدا نمایش داده نمی‌شود.
+
+        # --- بخش جدید: برای هماهنگی بین نخ‌ها ---
+        # این Event به نخ اصلی اطلاع می‌دهد که GUI آماده است
+        self.gui_ready_event = threading.Event()
+        # مختصات drag
+        self.start_x = 0
+        self.start_y = 0
+
+    def clean_exit(self):
+        """خاموش کردن کامل پنجره و منتظر ماندن برای پایان نخ GUI"""
+        self.is_monitoring = False
+
+        if self.root:
+            try:
+                # 1. دستور بسته شدن (destroy) را به نخ GUI می‌فرستد
+                # اگر self.root وجود داشته باشد، یعنی زمانی پنجره باز شده.
+                self.root.after(0, self.root.destroy)
+            except Exception as e:
+                logging.error(f"Error scheduling GUI close: {e}")
+
+        # 2. بررسی شیء self.gui_thread قبل از استفاده از متدهای آن
+        if self.gui_thread is not None:
+            # توجه: از is_alive() استفاده کنید، نه is_live()
+            if self.gui_thread.is_alive():
+                logging.info("Waiting for GUI thread to finish...")
+                # 3. منتظر می‌ماند تا نخ GUI بعد از دریافت سیگنال destroy() تمام شود
+                self.gui_thread.join(timeout=3)
+
+                if self.gui_thread.is_alive():
+                    logging.warning("GUI thread did not shut down gracefully.")
+                else:
+                    logging.info("GUI thread shut down successfully.")
+        # 🔑 حذف رفرنس ها پس از destroy
+        self.root = None
+        self.label = None
+        self.gui_thread = None
+        self.is_running = False  # نخ کاملا مرده است
+        self._cleanup_memory()
+        # self.gui_thread = None
+        # self.root = None
+
+    def _create_floating_window(self):
+        """ساخت پنجره شناور در وسط بالا"""
+        try:
+            self.root = tk.Tk()
+            # self.root.withdraw()  # مشکل اینجا
+
+            self.gui_ready_event.clear()  # اعلام می‌کنیم که GUI در حال ساخت است
+            # حذف titlebar و border
+            self.root.overrideredirect(True)
+
+            # همیشه روی همه پنجره‌ها
+            self.root.attributes("-topmost", True)
+
+            # پس‌زمینه مشکی شفاف
+            self.root.configure(bg="black")
+            self.root.attributes("-alpha", 0.9)  # شفافیت
+
+            # محاسبه موقعیت وسط بالا
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            window_width = 300
+            window_height = 55
+
+            x_position = (screen_width - window_width) // 2  # وسط افقی
+            y_position = 1  # 10 پیکسل از بالا
+
+            self.root.geometry(
+                f"{window_width}x{window_height}+{x_position}+{y_position}"
+            )
+
+            # لیبل برای نمایش سود
+            self.label = tk.Label(
+                self.root,
+                text="💰 0.00 $",
+                font=("Arial", 30, "bold"),
+                fg="white",
+                bg="black",
+                padx=0,
+                pady=0,
+            )
+            self.label.pack(expand=True)
+
+            # امکان drag کردن پنجره
+            self.label.bind("<Button-1>", self._start_drag)
+            self.label.bind("<B1-Motion>", self._do_drag)
+
+            # دابل کلیک برای بستن
+            self.label.bind("<Double-Button-1>", self._close_window)
+
+            logging.info("📊 Floating window created")
+            # --- تغییر کلیدی: پنجره را در ابتدا پنهان کن ---
+            # self.root.withdraw()
+            # --- بخش جدید: به نخ اصلی اطلاع بده که GUI آماده است ---
+            self.gui_ready_event.set()
+        except Exception as e:
+            logging.error(f"📊 Window creation error: {e}")
+            self.gui_ready_event.set()  # در صورت خطا هم event را set کن تا نخ اصلی گیر نکند
+
+    def _start_drag(self, event):
+        """شروع drag کردن پنجره"""
+        self.start_x = event.x
+        self.start_y = event.y
+
+    def _do_drag(self, event):
+        """انجام drag"""
+        x = self.root.winfo_x() + (event.x - self.start_x)
+        y = self.root.winfo_y() + (event.y - self.start_y)
+        self.root.geometry(f"+{x}+{y}")
+
+    def _close_window(self, event):
+        """بستن پنجره با دابل کلیک (فقط پنهان کردن)"""
+        # مستقیماً stop_monitoring را صدا می‌زنیم
+        # چون این از نخ GUI اجرا می‌شود، امن است
+        self.stop_monitoring()
+
+    def _safe_close(self):
+        """
+        این متد همیشه باید از طریق root.after() فراخوانی شود
+        تا تضمین کند که در نخ GUI اجرا می‌شود.
+        """
+        try:
+            if self.root:
+                # حذف تمام ویجت‌ها
+                # for widget in self.root.winfo_children():
+                #     widget.destroy()
+                # self.root.quit()
+                # self.root.destroy()
+                # 🔑 مهم: به جای destroy کردن، فقط مخفی می‌کنیم
+                self.root.withdraw()
+                self.is_visible = False
+                self.is_monitoring = False  # قطع مانیتورینگ
+                logging.info("📊 Floating window closed")
+        except Exception as e:
+            logging.error(f"📊 Safe window close error: {e}")
+        finally:
+            # self.root = None
+            # self.label = None
+            # self.gui_thread = None  # نخ GUI کارش تمام شد
+            # self._cleanup_memory()
+            log_memory_usage("closing floating window")
+
+    def _update_profit_display(self, profit):
+        """آپدیت نمایش سود"""
+        # اضافه کردن چک برای وجود پنجره و وضعیت مانیتورینگ
+        if not self.is_monitoring or not self.root or not self.label:
+            return
+
+        # چک کردن که پنجره هنوز وجود دارد
+        try:
+            self.root.winfo_exists()
+        except:
+            return
+        try:
+            # profit_sign = "+" if profit >= 0 else ""
+            # color = "#00ff00" if profit >= 0 else "#ff0000"  # سبز و قرمز پررنگ
+            profit_sign = "+" if profit > 0 else ""
+            color = (
+                "#00ff00" if profit > 0 else ("#ff0000" if profit < 0 else "#9B9B9A")
+            )
+
+            self.label.config(text=f"💰 {profit_sign}{profit:,.2f} $", fg=color)
+
+        except Exception as e:
+            logging.error(f"📊 Display update error: {e}")
+
+    def _gui_loop(self):
+        """حلقه GUI"""
+        try:
+            self._create_floating_window()
+            self.root.mainloop()
+        except Exception as e:
+            logging.error(f"📊 GUI loop error: {e}")
+
+    def _cleanup_memory(self):
+        """آزادسازی حافظه مربوط به پنجره شناور"""
+        import gc
+
+        # حذف رفرنس‌های بزرگ
+        if hasattr(self, "root"):
+            self.root = None
+        if hasattr(self, "label"):
+            self.label = None
+        gc.collect()
+
+    def start_monitoring(self):
+        log_memory_usage("")
+        """شروع مانیتورینگ و نمایش پنجره"""
+        if self.is_monitoring:
+            return "⚠️ مانیتورینگ فعال است"
+
+        # # اگر نخ مانیتور قبلی هنوز زنده است
+        # if self.monitor_thread and self.monitor_thread.is_alive():
+        #     self.is_monitoring = False  # سیگنال توقف بده
+        #     self.monitor_thread.join(timeout=1)  # 1 ثانیه صبر کن تا بمیرد
+
+        # === تغییر کلیدی ===
+        # اگر نخ GUI قبلی هنوز زنده است (مثلا در حال بسته شدن)، اجازه نده شروع شود
+        # if self.gui_thread and self.gui_thread.is_alive():
+        #     return "⚠️ پنجره قبلی در حال بسته شدن است. لطفاً چند ثانیه صبر کنید و دوباره امتحان کنید."
+
+        # اگر پنجره قبلاً باز است، ببندش
+        # if self.root:
+        #     try:
+        #         self.root.quit()
+        #         self.root.destroy()
+        #     except:
+        #         pass
+        # 🔑 بخش کلیدی: فقط یک بار نخ GUI را شروع کن
+        if not self.is_running:
+            self.gui_thread = threading.Thread(
+                target=self._gui_loop, daemon=True, name="Floating_GUI_Thread"
+            )
+            self.gui_thread.start()
+            self.is_running = True
+
+            # صبر کن تا GUI آماده شود (با استفاده از Event بهتر است)
+            # time.sleep(2)  # حذف شده
+            self.gui_ready_event.wait(timeout=5)  # 5 ثانیه منتظر آماده شدن GUI باش
+
+            if not self.root:
+                logging.error("📊 GUI thread failed to create root window.")
+                self.is_running = False
+                self.gui_thread = None
+                return "❌ خطا در ایجاد پنجره. لطفاً لاگ‌ها را بررسی کنید."
+
+        # self.root = None
+        # self.label = None
+        self.last_profit = 0  # ریست کردن سود قبلی
+        self.is_monitoring = True
+        # # شروع thread GUI
+        # self.gui_thread = threading.Thread(
+        #     target=self._gui_loop, daemon=True, name="Floating_GUI_Thread"
+        # )
+        # self.gui_thread.start()
+
+        # صبر کن تا GUI آماده شود
+        # time.sleep(2)
+
+        # === تغییر کلیدی ===
+        # مطمئن شو که root ساخته شده است
+        if not self.root:
+            logging.error("📊 GUI thread failed to start or create root window.")
+            self.gui_thread = None
+            return "❌ خطا در ایجاد پنجره. لطفاً لاگ‌ها را بررسی کنید."
+        # نمایش مجدد پنجره (این کار را به monitor_loop واگذار می‌کنیم)
+        # 🔑 مهم: اگر نخ مانیتور قبلی مرده، یکی جدید بساز
+        if self.monitor_thread is None or not self.monitor_thread.is_alive():
+            self.monitor_thread = threading.Thread(
+                target=self._monitor_loop, daemon=True, name="Floating_Monitor_Thread"
+            )
+            self.monitor_thread.start()
+        # self.is_monitoring = True
+        # self.monitor_thread = threading.Thread(
+        #     target=self._monitor_loop, daemon=True, name="Floating_Monitor_Thread"
+        # )
+        # self.monitor_thread.start()
+
+        logging.info("📊 Floating profit monitor started")
+        return "✅ پنجره شناور سود فعال شد\n🖱️ برای جابجایی: کلیک و درگ کنید\n🖱️ برای بستن: دابل کلیک"
+
+    def stop_monitoring(self):
+        """توقف مانیتورینگ و بستن پنجره"""
+        if not self.is_monitoring:
+            return "⚠️ مانیتورینگ فعال نیست"
+
+        self.is_monitoring = False
+        # self.is_visible = False  # ✅ این خط را اضافه کن
+        # === تغییر کلیدی ===
+        # بستن پنجره را به نخ GUI واگذار کن
+        # این کار غیرمسدودکننده (non-blocking) است و بلافاصله برمی‌گردد
+        if self.root:
+            try:
+                # self.root.after(0, self._safe_close)
+                self.root.after(0, self.root.withdraw)  # فقط مخفی کن
+                self.is_visible = False
+            except Exception as e:
+                # اگر نخ GUI قبلاً مرده باشد، این خطا رخ می‌دهد
+                logging.error(f"📊 Window close schedule error: {e}")
+                self.root = None  # فقط رها کن
+                self.label = None
+
+        # === تغییر کلیدی ===
+        # دیگر منتظر نخ مانیتورینگ نمان (join نکن)
+        # join() باعث می‌شد نخ تلگرام مسدود شود و نتواند پاسخ را ارسال کند
+        # چون نخ مانیتور daemon=True است، خودش متوقف خواهد شد
+        # if self.monitor_thread:
+        #    self.monitor_thread.join(timeout=3) # <--- این خط را حذف کن
+        # بستن پنجره
+        # if self.root:
+        #     try:
+        #         self.root.quit()
+        #         # self.root.destroy()
+        #         self.root = None
+        #         self.label = None
+        #     except Exception as e:
+        #         logging.error(f"📊 Window close error: {e}")
+
+        logging.info("📊 Floating profit monitor stopped")
+        return "🛑 پنجره شناور بسته شد"
+
+    def get_status(self):
+        """وضعیت فعلی"""
+        try:
+            positions = mt5.positions_get()
+            total_profit = sum(pos.profit for pos in positions) if positions else 0
+
+            status = f"""
+📊 **وضعیت پنجره شناور**
+
+💰 **سود کل:** {total_profit:,.2f}$
+📈 **تعداد پوزیشن:** {len(positions) if positions else 0}
+🔔 **مانیتورینگ:** {'فعال' if self.is_monitoring else 'غیرفعال'}
+🪟 **پنجره:** {'باز' if self.root else 'بسته'}
+📍 **موقعیت:** وسط بالای صفحه
+
+"""
+            return status
+
+        except Exception as e:
+            return f"❌ خطا در دریافت وضعیت: {e}"
+
+    def _monitor_loop(self):
+        """حلقه اصلی مانیتورینگ"""
+        while self.is_monitoring:
+            try:
+                if not self.is_monitoring:
+                    break
+                time.sleep(self.check_interval)
+                # چک کردن وضعیت مانیتورینگ بعد از sleep
+                if not self.is_monitoring:
+                    break
+
+                # === تغییر کلیدی ===
+                # اگر پنجره (root) دیگر وجود ندارد (بسته شده)، حلقه را متوقف کن
+                if not self.root:
+                    self.is_monitoring = False
+                    break
+
+                if not mt5.terminal_info() or not mt5.terminal_info().connected:
+                    continue
+
+                # positions = mt5.positions_get()
+                # if not positions:
+                #     # اگر پوزیشنی نیست، صفر نمایش بده
+                #     if self.last_profit != 0:
+                #         # === تغییر کلیدی ===
+                #         # آپدیت را به نخ GUI بسپار
+                #         if self.root:
+                #             self.root.after(0, self._update_profit_display, 0)
+                #         self.last_profit = 0
+                #     continue
+                # ... بخشی از حلقه مانیتورینگ شما (احتمالاً در یک متد به نام monitor_positions)
+
+                positions = mt5.positions_get()
+
+                # =========================================================
+                # 🔑 منطق مخفی سازی: اگر پوزیشنی نیست
+                # =========================================================
+                if not positions:
+                    # 1. آپدیت سود به صفر (طبق کد قبلی شما)
+                    if self.last_profit != 0:
+                        if self.root:
+                            self.root.after(0, self._update_profit_display, 0)
+                        self.last_profit = 0
+
+                    # 2. اگر پنجره نمایش داده می‌شود، آن را مخفی کن
+                    if self.root:
+                        self.root.after(
+                            0, self.root.withdraw
+                        )  # متد Tkinter برای مخفی کردن پنجره
+                        # self.is_visible = False
+
+                    continue  # ادامه حلقه برای چک بعدی
+
+                # =========================================================
+                # 🔑 منطق نمایش: اگر پوزیشن باز وجود دارد
+                # =========================================================
+
+                # اگر پنجره مخفی است، آن را نمایش بده
+                if self.root:
+                    self.root.after(
+                        0, self.root.deiconify
+                    )  # متد Tkinter برای نمایش مجدد پنجره
+                    # self.is_visible = True
+
+                # ... ادامه منطق برنامه برای محاسبه سود، آپدیت نمایش و ...
+                # ...
+                total_profit = sum(pos.profit for pos in positions)
+
+                # فقط اگر سود تغییر کرده آپدیت کن
+                if abs(total_profit - self.last_profit) > 0.01:
+                    # === تغییر کلیدی ===
+                    # آپدیت را به نخ GUI بسپار
+                    if self.root:
+                        self.root.after(0, self._update_profit_display, total_profit)
+                    self.last_profit = total_profit
+
+            except Exception as e:
+                logging.error(f"📊 Monitor error: {e}")
+                time.sleep(10)
+        logging.info("📊 Monitor loop finished.")
+
+
+# ایجاد نمونه جهانی
+floating_profit = FloatingProfitWindow()
+
+
+def start_floating_window(update, context):
+    """شروع پنجره شناور"""
+    try:
+        result = floating_profit.start_monitoring()
+        update.message.reply_text(result)
+    except Exception as e:
+        update.message.reply_text(f"❌ خطا: {e}")
+
+
+def stop_floating_window(update, context):
+    """توقف پنجره شناور"""
+    try:
+        result = floating_profit.stop_monitoring()
+        update.message.reply_text(result)
+    except Exception as e:
+        update.message.reply_text(f"❌ خطا: {e}")
+
+
+def floating_status(update, context):
+    """وضعیت پنجره شناور"""
+    try:
+        status = floating_profit.get_status()
+        update.message.reply_text(status, parse_mode="Markdown")
+    except Exception as e:
+        update.message.reply_text(f"❌ خطا: {e}")
+
+
+# ===================================================================
 
 
 # =====================تابع برگرداندن منطقه زمانی بروکر =====================
@@ -286,6 +785,236 @@ def remove_id_from_db(message_id):
     conn.close()
 
 
+# ========================= سرور SMTP سفارشی =========================
+
+# =============== خاموش کردن لاگ‌های aiosmtpd ==================
+# import logging
+
+# logging.getLogger("aiosmtpd").setLevel(logging.CRITICAL)
+logging.getLogger("mail.log").setLevel(logging.CRITICAL)
+# logging.getLogger("aiosmtpd.smtp").setLevel(logging.CRITICAL)
+# logging.getLogger("aiosmtpd.controller").setLevel(logging.CRITICAL)
+# logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+# ===============================================================
+
+
+class QuietSMTPHandler:
+    def __init__(self):
+        self.bot = Bot(token=TOKEN)
+
+    async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
+        envelope.rcpt_tos.append(address)
+        return "250 OK"
+
+    async def handle_DATA(self, server, session, envelope):
+        try:
+            # فقط لاگ مهم را نگه دار
+            logging.info(f"📧 New alert from MT5")
+
+            # پارس کردن ایمیل
+            msg = BytesParser(policy=policy.default).parsebytes(envelope.content)
+            subject = msg.get("subject", "No Subject")
+            body = ""
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type == "text/plain":
+                        body = part.get_content()
+                        break
+            else:
+                body = msg.get_content()
+
+            if not body:
+                body = envelope.content.decode("utf-8", errors="ignore")
+
+            # ارسال به تلگرام
+            telegram_message = (
+                f"**📧 MT5 Alert**\n\n**Subject:** {subject}\n**Message:** {body}"
+            )
+
+            sent_msg = self.bot.send_message(
+                chat_id=CHAT_ID, text=telegram_message, parse_mode="Markdown"
+            )
+
+            logging.info(f"✅ Alert forwarded to Telegram")
+
+            if sent_msg and not any(keyword in body for keyword in KEYWORDS_TO_KEEP):
+                alert_message_ids.append(sent_msg.message_id)
+                add_id_to_db(sent_msg.message_id)
+
+            return "250 OK"
+
+        except Exception as e:
+            logging.error(f"❌ Error processing alert: {e}")
+            return "550 Error"
+
+
+class TelegramHandler:
+    def __init__(self):
+        self.bot = Bot(token=TOKEN)
+
+    async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
+        envelope.rcpt_tos.append(address)
+        return "250 OK"
+
+    async def handle_DATA(self, server, session, envelope):
+        try:
+            # logging.info(f"📧 Email received from: {envelope.mail_from}")
+
+            # پارس کردن ایمیل
+            msg = BytesParser(policy=policy.default).parsebytes(envelope.content)
+
+            # گرفتن موضوع
+            subject = msg.get("subject", "No Subject")
+
+            # استخراج متن ایمیل
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type == "text/plain":
+                        body = part.get_content()
+                        break
+            else:
+                body = msg.get_content()
+
+            # اگر body خالی بود، از متن اصلی استفاده کن
+            if not body:
+                body = msg.get_content()
+
+            # ساخت پیام برای تلگرام
+            telegram_message = (
+                f"**📧 MT5 Alert**\n\n**Subject:** {subject}\n**Message:** {body}"
+            )
+
+            # ارسال به تلگرام
+            sent_msg = self.bot.send_message(
+                chat_id=CHAT_ID, text=telegram_message, parse_mode="Markdown"
+            )
+
+            logging.info(f"{subject}")
+
+            # اگر پیام مهم نبود، برای پاک کردن علامت بزن
+            if sent_msg and not any(keyword in body for keyword in KEYWORDS_TO_KEEP):
+                alert_message_ids.append(sent_msg.message_id)
+                add_id_to_db(sent_msg.message_id)
+
+            return "250 Message accepted for delivery"
+
+        except Exception as e:
+            logging.error(f"❌ Error processing email: {e}")
+            return "550 Error processing message"
+
+
+class SMTPController:
+    def __init__(self):
+        self.controller = None
+        self.handler = TelegramHandler()
+
+    def start(self):
+        """شروع کنترلر SMTP"""
+        try:
+            self.controller = Controller(
+                self.handler,
+                hostname="localhost",
+                port=1025,
+                auth_required=False,
+                enable_SMTPUTF8=False,
+            )
+            self.controller.start()
+            logging.info("SMTP Server started on localhost:1025")
+            return True
+        except Exception as e:
+            logging.error(f"❌ Failed to start SMTP server: {e}")
+            return False
+
+    def stop(self):
+        """توقف کنترلر SMTP"""
+        if self.controller:
+            self.controller.stop()
+            logging.info("🛑 SMTP Server stopped")
+
+
+def run_smtp_server():
+    """اجرای سرور SMTP در ترد جداگانه"""
+    try:
+        # ایجاد event loop جدید برای این ترد
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        controller = SMTPController()
+        if controller.start():
+            # اجرای حلقه رویداد
+            loop.run_forever()
+        else:
+            logging.error("❌ SMTP server failed to start")
+    except Exception as e:
+        logging.error(f"❌ SMTP server error: {e}")
+    finally:
+        if "loop" in locals():
+            loop.close()
+
+
+def start_smtp_server_thread():
+    """شروع سرور SMTP در یک ترد جداگانه"""
+    smtp_thread = threading.Thread(target=run_smtp_server, daemon=True)
+    smtp_thread.start()
+    return smtp_thread
+
+
+def setup_smtp_server():
+    """تنظیم و راه‌اندازی سرور SMTP"""
+    try:
+        # تست کردن که پورت 1025 آزاد است
+        import socket
+
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.settimeout(1)
+        result = test_socket.connect_ex(("localhost", 1025))
+        test_socket.close()
+
+        if result == 0:
+            logging.warning("⚠️ Port 1025 is already in use. Trying port 1026...")
+            # می‌توانید پورت دیگری را امتحان کنید
+            return False
+
+        logging.info("✅ Port 1025 is available for SMTP server")
+
+        # شروع سرور SMTP
+        start_smtp_server_thread()
+        logging.info("✅ SMTP Server thread started successfully")
+        return True
+
+    except Exception as e:
+        logging.error(f"❌ SMTP Server setup failed: {e}")
+        return False
+
+
+# دستور تست ایمیل (بدون تغییر)
+def test_email_command(update, context):
+    """دستور تست برای ارسال ایمیل آزمایشی"""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+
+        # ساخت ایمیل تست
+        msg = MIMEText("This is a test email from MT5 Bot\nTest message content.")
+        msg["Subject"] = "Test Alert from MT5 Bot"
+        msg["From"] = "test@localhost"
+        msg["To"] = "alert@localhost"
+
+        # ارسال به سرور SMTP محلی
+        with smtplib.SMTP("localhost", 1025, timeout=10) as server:
+            server.send_message(msg)
+
+        update.message.reply_text("✅ Test email sent successfully!")
+
+    except Exception as e:
+        update.message.reply_text(f"❌ Test failed: {str(e)}")
+        logging.error(f"Test email error: {e}")
+
+
 # ====================== اتصال به تلگرام ======================
 bot = Bot(token=TOKEN)
 updater = None
@@ -306,6 +1035,10 @@ def send_telegram(text):
         #     bot.send_message(chat_id=CHAT_ID, text="⚠️ Network unstable.", parse_mode='Markdown')
         # except Exception as e_warn:
         #     logging.error(f"⚠️Could not send the warning message: {e_warn}")
+    finally:
+        # 🔥 آزادسازی حافظه موقت
+        if len(text) > 1000:  # اگر پیام خیلی بزرگ بود
+            _cleanup_large_text()
 
     # ۳. حلقه تلاش‌های مجدد شروع می‌شود (چون تلاش اول ناموفق بود)
     for i in range(1, RETRY_COUNT):
@@ -335,6 +1068,13 @@ def send_telegram(text):
         parse_mode="Markdown",
     )
     return None  # --- تغییر: در صورت شکست نهایی، None برگردان ---
+
+
+def _cleanup_large_text():
+    """آزادسازی حافظه برای متن‌های بزرگ"""
+    import gc
+
+    gc.collect()
 
 
 # ----------------- تابع گزارش خطای شبکه listening -------------------
@@ -492,7 +1232,9 @@ def handle_alert():
 
     # ارسال پیام به تلگرام
     # ما این کار را در یک ترد جداگانه انجام می‌دهیم تا سرور بلافاصله پاسخ دهد
-    threading.Thread(target=send_alert_and_log, args=(alert_message,)).start()
+    threading.Thread(
+        target=send_alert_and_log, args=(alert_message,), name="Alert_Thread"
+    ).start()
 
     return "OK", 200
 
@@ -720,693 +1462,794 @@ def report_button_handler(update, context):
 def generate_and_send_report(
     message, context, start_time, end_time, title, mode="full"
 ):
-    sent_messages_info = []  # <--- لیست محلی برای این تابع
+    with _cleanup_after_report():
+        log_memory_usage("")
+        sent_messages_info = []  # <--- لیست محلی برای این تابع
 
-    """موتور اصلی برای ساخت و ارسال تمام گزارش‌ها"""
-    terminal_info = mt5.terminal_info()
-    if not terminal_info or not terminal_info.connected:
-        prompt_text = (
-            "اسکریپت به متاتریدر متصل نیست. لطفاً چند لحظه دیگر دوباره تلاش کنید."
+        """موتور اصلی برای ساخت و ارسال تمام گزارش‌ها"""
+        terminal_info = mt5.terminal_info()
+        if not terminal_info or not terminal_info.connected:
+            prompt_text = (
+                "اسکریپت به متاتریدر متصل نیست. لطفاً چند لحظه دیگر دوباره تلاش کنید."
+            )
+            sent_msg = message.reply_text(prompt_text)
+            if sent_msg:
+                sent_messages_info.append(
+                    {"id": sent_msg.message_id, "text": prompt_text}
+                )
+            process_messages_for_clearing(sent_messages_info)
+            return
+        # به جای 0، از یک تاریخ معقول در گذشته (مثلاً ۵ سال قبل) شروع می‌کنیم
+        # این کار از محدودیت‌های احتمالی بروکر جلوگیری می‌کند
+        # naive_start_time = datetime.combine(end_time.date() - timedelta(days=7), datetime.min.time())
+        # start_time = make_aware(naive_start_time)
+        start_date_for_history = end_time - timedelta(days=365 * 5)  # 5 years back
+        # در ابتدا کل تاریخچه رو میگیریم بعدا فیلتر میکنیم که توی بازه نشون بده فقط
+        deals = mt5.history_deals_get(start_date_for_history, end_time)
+        # --- بخش جدید: گرفتن کل تاریخچه برای محاسبه دراودان ---
+        all_deals_for_drawdown = mt5.history_deals_get(
+            datetime(2000, 1, 1, tzinfo=pytz.utc), end_time
         )
-        sent_msg = message.reply_text(prompt_text)
-        if sent_msg:
-            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
-        process_messages_for_clearing(sent_messages_info)
-        return
-    # به جای 0، از یک تاریخ معقول در گذشته (مثلاً ۵ سال قبل) شروع می‌کنیم
-    # این کار از محدودیت‌های احتمالی بروکر جلوگیری می‌کند
-    # naive_start_time = datetime.combine(end_time.date() - timedelta(days=7), datetime.min.time())
-    # start_time = make_aware(naive_start_time)
-    start_date_for_history = end_time - timedelta(days=365 * 5)  # 5 years back
-    # در ابتدا کل تاریخچه رو میگیریم بعدا فیلتر میکنیم که توی بازه نشون بده فقط
-    deals = mt5.history_deals_get(start_date_for_history, end_time)
-    # --- بخش جدید: گرفتن کل تاریخچه برای محاسبه دراودان ---
-    all_deals_for_drawdown = mt5.history_deals_get(
-        datetime(2000, 1, 1, tzinfo=pytz.utc), end_time
-    )
 
-    if not deals:
-        prompt_text = f"در بازه زمانی گزارش ({title}) هیچ معامله‌ای یافت نشد."
-        sent_msg = message.reply_text(prompt_text)
-        if sent_msg:
-            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
-        process_messages_for_clearing(sent_messages_info)
-        return
+        if not deals:
+            prompt_text = f"در بازه زمانی گزارش ({title}) هیچ معامله‌ای یافت نشد."
+            sent_msg = message.reply_text(prompt_text)
+            if sent_msg:
+                sent_messages_info.append(
+                    {"id": sent_msg.message_id, "text": prompt_text}
+                )
+            process_messages_for_clearing(sent_messages_info)
+            return
 
-    report_lines, total_profit, closed_trades_count, win_count = [], 0.0, 0, 0
-    # متغیرهای جدید برای آمار سود و ضرر
-    max_profit = 0.0
-    max_loss = 0.0
-    total_profit_sum = 0.0
-    total_loss_sum = 0.0
-    profit_trades_count = 0
-    loss_trades_count = 0
-    actual_date_report = ""
+        report_lines, total_profit, closed_trades_count, win_count = [], 0.0, 0, 0
+        # متغیرهای جدید برای آمار سود و ضرر
+        max_profit = 0.0
+        max_loss = 0.0
+        total_profit_sum = 0.0
+        total_loss_sum = 0.0
+        profit_trades_count = 0
+        loss_trades_count = 0
+        actual_date_report = ""
 
-    real_win_count = 0
-    real_loss_count = 0
-    breakeven_count = 0
-    total_balance_change_period = 0.0
-    trade_counter = 1
-    commission = 0.0
-    swap = 0.0
-    positions = {}
-    # این حلقه برای گرفتن معاملات کل تاریخچه از 5 سال گذشته تا الان هست بجز اون شرط زمان که داخلش هست
-    for deal in deals:
-        # --- این خط را اضافه کنید تا تراکنش‌های غیرمعاملاتی نادیده گرفته شوند ---
-        if deal.position_id == 0:
-            continue  # این دیل را نادیده بگیر و برو سراغ دیل بعدی
-        # --- این بلوک کد جدید را اضافه کنید ---
-        # این بلاک برای محاسبه ی این متغییر ها در بازه ی گزارش است
-        deal_time = datetime.fromtimestamp(deal.time, tz=pytz.utc)
-        if start_time <= deal_time <= end_time:
-            total_balance_change_period += deal.profit + deal.commission + deal.swap
-            commission += deal.commission
-            swap += deal.swap
-        # --- پایان بلوک جدید ---
-        total_profit += deal.commission + deal.swap  # سود کل معاملات تاریخچه نه بازه
-        # --- بخش جدید برای تجمیع اطلاعات پوزیشن ---
-        position_id = deal.position_id
-        if position_id not in positions:
-            positions[position_id] = {
-                "profit": 0.0,
-                "volume": 0.0,
-                "symbol": deal.symbol,
-                "close_time": 0,
-                "trade_volume": 0.0,
-            }
+        real_win_count = 0
+        real_loss_count = 0
+        breakeven_count = 0
+        total_balance_change_period = 0.0
+        trade_counter = 1
+        commission = 0.0
+        swap = 0.0
+        positions = {}
+        # این حلقه برای گرفتن معاملات کل تاریخچه از 5 سال گذشته تا الان هست بجز اون شرط زمان که داخلش هست
+        for deal in deals:
+            # --- این خط را اضافه کنید تا تراکنش‌های غیرمعاملاتی نادیده گرفته شوند ---
+            if deal.position_id == 0:
+                continue  # این دیل را نادیده بگیر و برو سراغ دیل بعدی
+            # --- این بلوک کد جدید را اضافه کنید ---
+            # این بلاک برای محاسبه ی این متغییر ها در بازه ی گزارش است
+            deal_time = datetime.fromtimestamp(deal.time, tz=pytz.utc)
+            if start_time <= deal_time <= end_time:
+                total_balance_change_period += deal.profit + deal.commission + deal.swap
+                commission += deal.commission
+                swap += deal.swap
+            # --- پایان بلوک جدید ---
+            total_profit += (
+                deal.commission + deal.swap
+            )  # سود کل معاملات تاریخچه نه بازه
+            # --- بخش جدید برای تجمیع اطلاعات پوزیشن ---
+            position_id = deal.position_id
+            if position_id not in positions:
+                positions[position_id] = {
+                    "profit": 0.0,
+                    "volume": 0.0,
+                    "symbol": deal.symbol,
+                    "close_time": 0,
+                    "trade_volume": 0.0,
+                }
 
-        positions[position_id]["profit"] += deal.profit  # + deal.commission + deal.swap
-
-        if deal.entry == mt5.DEAL_ENTRY_IN:
-            positions[position_id]["volume"] += deal.volume
-            # positions[position_id]['close_time'] = deal.time # اگه این فعال کنی و اونو غیر فعال پوزیشنها بر اساس زمان باز شدن مرتب میشن
-            # فقط حجم اولین معامله ورودی را به عنوان حجم کل پوزیشن در نظر می‌گیریم
-            if positions[position_id]["trade_volume"] == 0:
-                positions[position_id]["trade_volume"] = deal.volume
-        elif deal.entry in (
-            mt5.DEAL_ENTRY_OUT,
-            mt5.DEAL_ENTRY_OUT_BY,
-            mt5.DEAL_ENTRY_INOUT,
-        ):
-            positions[position_id]["volume"] -= deal.volume
             positions[position_id][
-                "close_time"
-            ] = deal.time  # زمان آخرین خروج ثبت می‌شود
+                "profit"
+            ] += deal.profit  # + deal.commission + deal.swap
+
+            if deal.entry == mt5.DEAL_ENTRY_IN:
+                positions[position_id]["volume"] += deal.volume
+                # positions[position_id]['close_time'] = deal.time # اگه این فعال کنی و اونو غیر فعال پوزیشنها بر اساس زمان باز شدن مرتب میشن
+                # فقط حجم اولین معامله ورودی را به عنوان حجم کل پوزیشن در نظر می‌گیریم
+                if positions[position_id]["trade_volume"] == 0:
+                    positions[position_id]["trade_volume"] = deal.volume
+            elif deal.entry in (
+                mt5.DEAL_ENTRY_OUT,
+                mt5.DEAL_ENTRY_OUT_BY,
+                mt5.DEAL_ENTRY_INOUT,
+            ):
+                positions[position_id]["volume"] -= deal.volume
+                positions[position_id][
+                    "close_time"
+                ] = deal.time  # زمان آخرین خروج ثبت می‌شود
+            # --- پایان بخش جدید ---
+            if deal.entry in (
+                mt5.DEAL_ENTRY_OUT,
+                mt5.DEAL_ENTRY_OUT_BY,
+                mt5.DEAL_ENTRY_INOUT,
+            ):
+                # closed_trades_count += 1
+                total_profit += deal.profit
+                # if deal.profit >= 0:
+                #     win_count += 1
+        # --- بخش جدید برای ساخت لیست گزارش از پوزیشن‌های نهایی ---
+        trade_counter = 1
+
+        # --- بخش جدید: فیلتر کردن پوزیشن‌ها بر اساس بازه زمانی اصلی گزارش ---
+        final_positions = {}
+        for pos_id, pos_data in positions.items():
+            # شرط ۱: پوزیشن باید کاملا بسته شده باشد
+            is_closed = abs(pos_data["volume"]) < 0.01
+
+            if is_closed and pos_data["close_time"] > 0:
+                # زمان را به صورت آگاه از منطقه زمانی (UTC) ایجاد می‌کنیم
+                close_datetime = datetime.fromtimestamp(
+                    pos_data["close_time"], tz=pytz.utc
+                )
+                # logging.info("position id: ", pos_id," close time: ", close_datetime)
+                # شرط ۲: زمان بسته شدن پوزیشن باید در بازه گزارش اصلی باشد
+                if start_time <= close_datetime <= end_time:
+                    final_positions[pos_id] = pos_data
         # --- پایان بخش جدید ---
-        if deal.entry in (
-            mt5.DEAL_ENTRY_OUT,
-            mt5.DEAL_ENTRY_OUT_BY,
-            mt5.DEAL_ENTRY_INOUT,
-        ):
-            # closed_trades_count += 1
-            total_profit += deal.profit
-            # if deal.profit >= 0:
-            #     win_count += 1
-    # --- بخش جدید برای ساخت لیست گزارش از پوزیشن‌های نهایی ---
-    trade_counter = 1
+        active_trading_days_set = set()
+        # مرتب‌سازی پوزیشن‌ها بر اساس زمان بسته شدن برای نمایش به ترتیب
+        sorted_positions = sorted(
+            final_positions.items(), key=lambda item: item[1]["close_time"]
+        )
 
-    # --- بخش جدید: فیلتر کردن پوزیشن‌ها بر اساس بازه زمانی اصلی گزارش ---
-    final_positions = {}
-    for pos_id, pos_data in positions.items():
-        # شرط ۱: پوزیشن باید کاملا بسته شده باشد
-        is_closed = abs(pos_data["volume"]) < 0.01
-
-        if is_closed and pos_data["close_time"] > 0:
-            # زمان را به صورت آگاه از منطقه زمانی (UTC) ایجاد می‌کنیم
-            close_datetime = datetime.fromtimestamp(pos_data["close_time"], tz=pytz.utc)
-            # logging.info("position id: ", pos_id," close time: ", close_datetime)
-            # شرط ۲: زمان بسته شدن پوزیشن باید در بازه گزارش اصلی باشد
-            if start_time <= close_datetime <= end_time:
-                final_positions[pos_id] = pos_data
-    # --- پایان بخش جدید ---
-    active_trading_days_set = set()
-    # مرتب‌سازی پوزیشن‌ها بر اساس زمان بسته شدن برای نمایش به ترتیب
-    sorted_positions = sorted(
-        final_positions.items(), key=lambda item: item[1]["close_time"]
-    )
-
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    # این بلوک کد را برای پیدا کردن تاریخ اولین ترید اضافه کنید
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-    first_trade_date_str = "---"  # مقدار پیش‌فرض
-    if sorted_positions:
-        # زمان اولین پوزیشن بسته شده در بازه را می‌گیریم
-        first_trade_timestamp = sorted_positions[0][1]["close_time"]
-        first_trade_dt_utc = datetime.fromtimestamp(first_trade_timestamp, tz=pytz.utc)
-
-        # به منطقه زمانی بروکر تبدیل می‌کنیم
-        broker_tz = pytz.timezone(BROKER_TIMEZONE)
-        first_trade_dt_broker = first_trade_dt_utc.astimezone(broker_tz)
-        first_trade_date_str = first_trade_dt_broker.strftime("%Y/%m/%d")
-    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-
-    for position_id, pos_data in sorted_positions:
-        # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
-        if abs(pos_data["volume"]) < 0.01 and pos_data["close_time"] > 0:
-            utc_time = datetime.fromtimestamp(pos_data["close_time"], tz=pytz.utc)
-            broker_tz = pytz.timezone(BROKER_TIMEZONE)
-            broker_dt_object = utc_time.astimezone(broker_tz)
-            trade_date = broker_dt_object.strftime("%y/%m/%d %H:%M:%S")
-            active_trading_days_set.add(broker_dt_object.date())
-
-            # شمارنده وین ریت قدیمی همچنان برای مقایسه محاسبه می‌شود
-            closed_trades_count += 1
-            # ... کد قبلی شما
-            if pos_data["profit"] >= 0:
-                win_count += 1
-                profit_trades_count += 1
-                total_profit_sum += pos_data["profit"]
-                if pos_data["profit"] > max_profit:
-                    max_profit = pos_data["profit"]
-            else:  # اگر معامله با ضرر بسته شده بود
-                loss_trades_count += 1
-                total_loss_sum += pos_data["profit"]  # ضررهایی که منفی هستند،جمع می‌کنیم
-                if pos_data["profit"] < max_loss:
-                    max_loss = pos_data["profit"]
-
-            line = f"{trade_counter:02d}-{pos_data['symbol']}|{pos_data['trade_volume']:.2f}|{pos_data['profit']:>8,.2f}|{trade_date}"
-            # line = f"{trade_counter:02d}-{pos_data['symbol']}|{pos_data['trade_volume']:.2f}|{pos_data['profit']:>8,.2f}|{trade_date}"
-            report_lines.append(f"`{line}`")
-            trade_counter += 1
-    # --- پایان بخش جدید ---
-
-    avg_profit = (
-        total_profit_sum / profit_trades_count if profit_trades_count > 0 else 0.0
-    )
-    avg_loss = total_loss_sum / loss_trades_count if loss_trades_count > 0 else 0.0
-
-    if not report_lines:
-        prompt_text = f"در بازه زمانی گزارش ({title}) هیچ پوزیشنی بسته نشده است."
-        sent_msg = message.reply_text(prompt_text)
-        if sent_msg:
-            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
-        process_messages_for_clearing(sent_messages_info)
-        return
-
-    win_rate = (win_count / closed_trades_count * 100) if closed_trades_count > 0 else 0
-    total_profit_sign = "✅" if total_profit >= 0 else "🔻"
-
-    # --- بخش جدید: محاسبه دقیق سود و رشد ---
-    account_info = mt5.account_info()
-    profit_line = ""
-    growth_line = ""
-    Not_available = ""  # اگر توی گزارش مقداری نبود این کاراکتر
-
-    if account_info:
-        # --- محاسبه دقیق سود کل اکانت از ابتدا ---
-        # --- بخش جدید: محاسبه دقیق سود کل اکانت بر اساس واریزی‌ها ---
-        # --- بخش جدید: محاسبه دقیق سود کل اکانت بر اساس شماره سفارش (order) ---
-        all_deals = mt5.history_deals_get(0, get_server_time())
-        total_balance_operations = 0.0
-        if all_deals:
-            for d in all_deals:
-                # تراکنش‌های واریز/برداشت معمولا شماره سفارش (order) صفر دارند
-                if d.order == 0:
-                    total_balance_operations += d.profit
-
-        # سود کل اکانت = بالانس فعلی - مجموع واریزی‌ها و برداشتی‌ها
-        true_total_account_profit = account_info.balance - total_balance_operations
-
-        # --- محاسبه سود بازه زمانی ---
-        # این بخش بدون تغییر است و از قبل درست بود
-        # starting_balance_period = account_info.balance - total_profit
-
-        # --- بخش جدید: محاسبه هوشمند بالانس ابتدای بازه ---
-        # چک می‌کنیم که آیا گزارش تا لحظه حال است یا یک گزارش تاریخی است
-        # (با یک بازه خطای ۵ ثانیه‌ای)
-        current_balance = ""
-        current_equity = ""
-        historical_end_balance = ""
-
-        # --- بخش جدید: تشخیص هوشمند نوع گزارش (لحظه‌ای یا تاریخی) ---
-        is_live_report = False  # پیش‌فرض را روی تاریخی می‌گذاریم
-
-        # شرط اول: آیا اختلاف زمانی بسیار کم است؟ (برای گزارش‌های روزانه)
-        if abs((end_time - get_server_time()).total_seconds()) < 10:
-            is_live_report = True
-        # شرط دوم: آیا تاریخ پایان گزارش، همان تاریخ امروز است؟ (برای تاریخ دستی)
-        elif end_time.date() == get_server_time().date():
-            is_live_report = True
-
-        # حالا بر اساس نتیجه، بالانس ابتدای بازه را محاسبه می‌کنیم
-        if is_live_report:
-            logging.info("Generating real-time report...")
-            # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
-            starting_balance_period = account_info.balance - total_balance_change_period
-            actual_trading_days_count = len(active_trading_days_set)
-            actual_date_report = (
-                f"اولین ترید(روز معاملاتی): ‎{first_trade_date_str}‏ ({str(actual_trading_days_count)})\n"
-                if actual_trading_days_count > 1
-                else ""
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        # این بلوک کد را برای پیدا کردن تاریخ اولین ترید اضافه کنید
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+        first_trade_date_str = "---"  # مقدار پیش‌فرض
+        if sorted_positions:
+            # زمان اولین پوزیشن بسته شده در بازه را می‌گیریم
+            first_trade_timestamp = sorted_positions[0][1]["close_time"]
+            first_trade_dt_utc = datetime.fromtimestamp(
+                first_trade_timestamp, tz=pytz.utc
             )
 
-            for position_id, pos_data in sorted_positions:
-                # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
-                if abs(pos_data["volume"]) < 0.01 and pos_data["close_time"] > 0:
-                    # --- بخش جدید: محاسبه هوشمند برد، باخت و سر به سر ---
-                    threshold_amount = starting_balance_period * (
-                        WINRATE_THRESHOLD_PERCENT / 100.0
-                    )
+            # به منطقه زمانی بروکر تبدیل می‌کنیم
+            broker_tz = pytz.timezone(BROKER_TIMEZONE)
+            first_trade_dt_broker = first_trade_dt_utc.astimezone(broker_tz)
+            first_trade_date_str = first_trade_dt_broker.strftime("%Y/%m/%d")
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-                    if pos_data["profit"] > threshold_amount:
-                        real_win_count += 1
-                    elif pos_data["profit"] < -threshold_amount:
-                        real_loss_count += 1
-                    else:
-                        breakeven_count += 1
+        for position_id, pos_data in sorted_positions:
+            # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
+            if abs(pos_data["volume"]) < 0.01 and pos_data["close_time"] > 0:
+                utc_time = datetime.fromtimestamp(pos_data["close_time"], tz=pytz.utc)
+                broker_tz = pytz.timezone(BROKER_TIMEZONE)
+                broker_dt_object = utc_time.astimezone(broker_tz)
+                trade_date = broker_dt_object.strftime("%y/%m/%d %H:%M:%S")
+                active_trading_days_set.add(broker_dt_object.date())
 
-            # --- بخش جدید: گرفتن اطلاعات بالانس و اکوییتی ---
-            account_info = mt5.account_info()
-            balance_equity_line = (
-                f"**موجودی ابتدای بازه:**`‎{starting_balance_period:,.2f}`‏\n**موجودی(حال):**‎`{account_info.balance:>8.2f}`**|اکوییتی(حال):**`{account_info.equity:,.2f}`\n"
+                # شمارنده وین ریت قدیمی همچنان برای مقایسه محاسبه می‌شود
+                closed_trades_count += 1
+                # ... کد قبلی شما
+                if pos_data["profit"] >= 0:
+                    win_count += 1
+                    profit_trades_count += 1
+                    total_profit_sum += pos_data["profit"]
+                    if pos_data["profit"] > max_profit:
+                        max_profit = pos_data["profit"]
+                else:  # اگر معامله با ضرر بسته شده بود
+                    loss_trades_count += 1
+                    total_loss_sum += pos_data[
+                        "profit"
+                    ]  # ضررهایی که منفی هستند،جمع می‌کنیم
+                    if pos_data["profit"] < max_loss:
+                        max_loss = pos_data["profit"]
+
+                line = f"{trade_counter:02d}-{pos_data['symbol']}|{pos_data['trade_volume']:.2f}|{pos_data['profit']:>8,.2f}|{trade_date}"
+                # line = f"{trade_counter:02d}-{pos_data['symbol']}|{pos_data['trade_volume']:.2f}|{pos_data['profit']:>8,.2f}|{trade_date}"
+                report_lines.append(f"`{line}`")
+                trade_counter += 1
+        # --- پایان بخش جدید ---
+
+        avg_profit = (
+            total_profit_sum / profit_trades_count if profit_trades_count > 0 else 0.0
+        )
+        avg_loss = total_loss_sum / loss_trades_count if loss_trades_count > 0 else 0.0
+
+        if not report_lines:
+            prompt_text = f"در بازه زمانی گزارش ({title}) هیچ پوزیشنی بسته نشده است."
+            sent_msg = message.reply_text(prompt_text)
+            if sent_msg:
+                sent_messages_info.append(
+                    {"id": sent_msg.message_id, "text": prompt_text}
+                )
+            process_messages_for_clearing(sent_messages_info)
+            return
+
+        win_rate = (
+            (win_count / closed_trades_count * 100) if closed_trades_count > 0 else 0
+        )
+        total_profit_sign = "✅" if total_profit >= 0 else "🔻"
+
+        # --- بخش جدید: محاسبه دقیق سود و رشد ---
+        account_info = mt5.account_info()
+        profit_line = ""
+        growth_line = ""
+        Not_available = ""  # اگر توی گزارش مقداری نبود این کاراکتر
+
+        if account_info:
+            # --- محاسبه دقیق سود کل اکانت از ابتدا ---
+            # --- بخش جدید: محاسبه دقیق سود کل اکانت بر اساس واریزی‌ها ---
+            # --- بخش جدید: محاسبه دقیق سود کل اکانت بر اساس شماره سفارش (order) ---
+            all_deals = mt5.history_deals_get(0, get_server_time())
+            total_balance_operations = 0.0
+            if all_deals:
+                for d in all_deals:
+                    # تراکنش‌های واریز/برداشت معمولا شماره سفارش (order) صفر دارند
+                    if d.order == 0:
+                        total_balance_operations += d.profit
+
+            # سود کل اکانت = بالانس فعلی - مجموع واریزی‌ها و برداشتی‌ها
+            true_total_account_profit = account_info.balance - total_balance_operations
+
+            # --- محاسبه سود بازه زمانی ---
+            # این بخش بدون تغییر است و از قبل درست بود
+            # starting_balance_period = account_info.balance - total_profit
+
+            # --- بخش جدید: محاسبه هوشمند بالانس ابتدای بازه ---
+            # چک می‌کنیم که آیا گزارش تا لحظه حال است یا یک گزارش تاریخی است
+            # (با یک بازه خطای ۵ ثانیه‌ای)
+            current_balance = ""
+            current_equity = ""
+            historical_end_balance = ""
+
+            # --- بخش جدید: تشخیص هوشمند نوع گزارش (لحظه‌ای یا تاریخی) ---
+            is_live_report = False  # پیش‌فرض را روی تاریخی می‌گذاریم
+
+            # شرط اول: آیا اختلاف زمانی بسیار کم است؟ (برای گزارش‌های روزانه)
+            if abs((end_time - get_server_time()).total_seconds()) < 10:
+                is_live_report = True
+            # شرط دوم: آیا تاریخ پایان گزارش، همان تاریخ امروز است؟ (برای تاریخ دستی)
+            elif end_time.date() == get_server_time().date():
+                is_live_report = True
+
+            # حالا بر اساس نتیجه، بالانس ابتدای بازه را محاسبه می‌کنیم
+            if is_live_report:
+                logging.info("Generating real-time report...")
+                # این یک گزارش تا لحظه ی حال است، از فرمول ساده استفاده کن
+                starting_balance_period = (
+                    account_info.balance - total_balance_change_period
+                )
+                actual_trading_days_count = len(active_trading_days_set)
+                actual_date_report = (
+                    f"اولین ترید(روز معاملاتی): ‎{first_trade_date_str}‏ ({str(actual_trading_days_count)})\n"
+                    if actual_trading_days_count > 1
+                    else ""
+                )
+
+                for position_id, pos_data in sorted_positions:
+                    # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
+                    if abs(pos_data["volume"]) < 0.01 and pos_data["close_time"] > 0:
+                        # --- بخش جدید: محاسبه هوشمند برد، باخت و سر به سر ---
+                        threshold_amount = starting_balance_period * (
+                            WINRATE_THRESHOLD_PERCENT / 100.0
+                        )
+
+                        if pos_data["profit"] > threshold_amount:
+                            real_win_count += 1
+                        elif pos_data["profit"] < -threshold_amount:
+                            real_loss_count += 1
+                        else:
+                            breakeven_count += 1
+
+                # --- بخش جدید: گرفتن اطلاعات بالانس و اکوییتی ---
+                account_info = mt5.account_info()
+                balance_equity_line = (
+                    f"**موجودی ابتدای بازه:**`‎{starting_balance_period:,.2f}`‏\n**موجودی(حال):**‎`{account_info.balance:>8.2f}`**\nاکوییتی(حال):**`{account_info.equity:,.2f}`\n"
+                    if account_info
+                    else ""
+                )
+                current_balance = f"{account_info.balance:,.2f}"
+                current_equity = (
+                    f"{account_info.equity:,.2f}" if account_info else Not_available
+                )
+                display_end_time = end_time
+            else:
+                logging.info("Generating historical report...")
+                # این یک گزارش تاریخ خاص است، از فرمول پیچیده‌تر استفاده کن
+                # ابتدا سود معاملاتی که بعد از بازه گزارش انجام شده را پیدا می‌کنیم
+                deals_after_period = mt5.history_deals_get(end_time, get_server_time())
+                profit_after_period = 0.0
+                if deals_after_period:
+                    for d in deals_after_period:
+                        if d.entry in (
+                            mt5.DEAL_ENTRY_IN,
+                            mt5.DEAL_ENTRY_OUT,
+                            mt5.DEAL_ENTRY_OUT_BY,
+                            mt5.DEAL_ENTRY_INOUT,
+                        ):
+                            profit_after_period += d.profit + d.commission + d.swap
+                # logging.info(f"Profit from deals after the period: {profit_after_period}")
+                # بالانس در انتهای بازه = بالانس فعلی - سود معاملات بعدی
+                balance_at_period_end = account_info.balance - profit_after_period
+                # logging.info(f"Current balance: {account_info.balance}")
+                # logging.info(f"Balance at period end: {balance_at_period_end}")
+                # بالانس ابتدای بازه = بالانس انتهای بازه - سود خود بازه
+                starting_balance_period = (
+                    balance_at_period_end - total_balance_change_period
+                )
+
+                for position_id, pos_data in sorted_positions:
+                    # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
+                    if abs(pos_data["volume"]) < 0.01 and pos_data["close_time"] > 0:
+                        # --- بخش جدید: محاسبه هوشمند برد، باخت و سر به سر ---
+                        threshold_amount = starting_balance_period * (
+                            WINRATE_THRESHOLD_PERCENT / 100.0
+                        )
+
+                        if pos_data["profit"] > threshold_amount:
+                            real_win_count += 1
+                        elif pos_data["profit"] < -threshold_amount:
+                            real_loss_count += 1
+                        else:
+                            breakeven_count += 1
+
+                # --- گرفتن اطلاعات بالانس تاریخی ---
+                balance_equity_line = (
+                    f"**موجودی ابتدای بازه:** `‎{starting_balance_period:,.2f}‏`\n**موجودی انتهای بازه:**`‎{balance_at_period_end:,.2f}`\n"
+                    if balance_at_period_end and starting_balance_period
+                    else ""
+                )
+                historical_end_balance = (
+                    f"{balance_at_period_end:,.2f}"
+                    if balance_at_period_end and starting_balance_period
+                    else Not_available
+                )
+                # این شرط تضمین می‌کند که یک روز از تاریخ پایان فقط و فقط زمانی کم شود که گزارش شما یک گزارش تاریخی باشد و زمان پایان آن دقیقاً ساعت ۰۰:۰۰ بامداد باشد.
+                # این کار باعث می‌شود که گزارش سفارشی شما (که زمان پایان آن ۲۳:۵۹ است) به درستی و بدون تغییر نمایش داده شود.
+                if end_time.time() == datetime.min.time():
+                    display_end_time = end_time - timedelta(days=1)
+                else:
+                    display_end_time = end_time
+                # برای گزارش‌های تاریخی، یک روز از تاریخ پایان کم می‌کنیم تا بازه درست نمایش داده شود
+                # display_end_time = end_time - timedelta(days=1)
+
+            profit_line = f"**سود اکانت(حال):**‎`{true_total_account_profit:>8.2f}$`‏\n**سود بازه:** ‎`{total_balance_change_period:,.2f}$`\n"
+
+            # --- محاسبه درصد رشد کل اکانت ---
+            initial_deposit = account_info.balance - true_total_account_profit
+            total_growth_percentage = 0.0
+            if initial_deposit != 0:
+                total_growth_percentage = (
+                    true_total_account_profit / initial_deposit
+                ) * 100
+            total_growth_sign = "+" if total_growth_percentage >= 0 else ""
+            total_growth_str = f"{total_growth_sign}{total_growth_percentage:.2f}%"
+
+            # --- محاسبه درصد رشد بازه زمانی ---
+            period_growth_percentage = 0.0
+            if starting_balance_period != 0:
+                period_growth_percentage = (
+                    total_balance_change_period / starting_balance_period
+                ) * 100
+            period_growth_sign = "+" if period_growth_percentage >= 0 else ""
+            period_growth_str = f"{period_growth_sign}{period_growth_percentage:.2f}%"
+
+            growth_line = f"**درصد رشد اکانت(حال): **‎`{total_growth_str}`‏\n**درصد رشد بازه: **‎`{period_growth_str}`\n"
+            broker_account_line = (
+                f"`{account_info.company} | {account_info.login}`\n"
                 if account_info
                 else ""
             )
-            current_balance = f"{account_info.balance:,.2f}"
-            current_equity = (
-                f"{account_info.equity:,.2f}" if account_info else Not_available
+
+            # --- بخش جدید: فراخوانی تابع دراودان برای دو حالت ---
+            # فراخوانی برای کل حساب
+            total_drawdown_info = calculate_drawdown_for_period(
+                all_deals_for_drawdown, datetime(2000, 1, 1, tzinfo=pytz.utc), end_time
             )
-            display_end_time = end_time
-        else:
-            logging.info("Generating historical report...")
-            # این یک گزارش تاریخ خاص است، از فرمول پیچیده‌تر استفاده کن
-            # ابتدا سود معاملاتی که بعد از بازه گزارش انجام شده را پیدا می‌کنیم
-            deals_after_period = mt5.history_deals_get(end_time, get_server_time())
-            profit_after_period = 0.0
-            if deals_after_period:
-                for d in deals_after_period:
-                    if d.entry in (
-                        mt5.DEAL_ENTRY_IN,
-                        mt5.DEAL_ENTRY_OUT,
-                        mt5.DEAL_ENTRY_OUT_BY,
-                        mt5.DEAL_ENTRY_INOUT,
-                    ):
-                        profit_after_period += d.profit + d.commission + d.swap
-            # logging.info(f"Profit from deals after the period: {profit_after_period}")
-            # بالانس در انتهای بازه = بالانس فعلی - سود معاملات بعدی
-            balance_at_period_end = account_info.balance - profit_after_period
-            # logging.info(f"Current balance: {account_info.balance}")
-            # logging.info(f"Balance at period end: {balance_at_period_end}")
-            # بالانس ابتدای بازه = بالانس انتهای بازه - سود خود بازه
-            starting_balance_period = (
-                balance_at_period_end - total_balance_change_period
+            # فراخوانی برای بازه گزارش
+            period_drawdown_info = calculate_drawdown_for_period(
+                all_deals_for_drawdown, start_time, end_time
+            )
+            drawdown_line = (
+                f"**دراودان کل:** `‎{total_drawdown_info['amount']:.2f}$`‎(`{total_drawdown_info['percent']:.2f}%`)\n"
+                f"**دراودان بازه:** `‎{period_drawdown_info['amount']:.2f}$`‎(`{period_drawdown_info['percent']:.2f}%`)\n"
+            )
+            reward_ratio = (avg_profit / abs(avg_loss)) if avg_loss != 0 else None
+            reward_ratio_str = (
+                f"{reward_ratio:.2f}" if reward_ratio is not None else "---"
             )
 
-            for position_id, pos_data in sorted_positions:
-                # یک پوزیشن زمانی کاملا بسته شده که حجم باقی‌مانده آن نزدیک به صفر باشد
-                if abs(pos_data["volume"]) < 0.01 and pos_data["close_time"] > 0:
-                    # --- بخش جدید: محاسبه هوشمند برد، باخت و سر به سر ---
-                    threshold_amount = starting_balance_period * (
-                        WINRATE_THRESHOLD_PERCENT / 100.0
-                    )
-
-                    if pos_data["profit"] > threshold_amount:
-                        real_win_count += 1
-                    elif pos_data["profit"] < -threshold_amount:
-                        real_loss_count += 1
-                    else:
-                        breakeven_count += 1
-
-            # --- گرفتن اطلاعات بالانس تاریخی ---
-            balance_equity_line = (
-                f"**موجودی ابتدای بازه:** `‎{starting_balance_period:,.2f}‏`\n**موجودی انتهای بازه:**`‎{balance_at_period_end:,.2f}`\n"
-                if balance_at_period_end and starting_balance_period
-                else ""
+            summary_old = (
+                f"**📊 گزارش {title}**\n"
+                f"_{start_time.strftime('%Y/%m/%d')} - {display_end_time.strftime('%Y/%m/%d')}_\n\n"
+                f"{actual_date_report}"
+                f"{balance_equity_line}"
+                f"{profit_line}"
+                f"{drawdown_line}"
+                f"{growth_line}"
+                f"کمیسیون بازه:`‎{commission:.2f}`‏|سواپ بازه:‎`{swap:.2f}`\n"
+                f"**نرخ برد بازه: **‎`{win_rate:.2f}%` ‏({win_count}/{closed_trades_count})\n"
+                f"**🏆نرخ برد واقعی: **`‎{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}%` ‏({real_win_count}/{real_win_count + real_loss_count})\n"
+                f"**معاملات سر به سر:** `{breakeven_count}`\n"
+                f"بیشترین س،ض: ‎{max_profit:,.2f}‏|‎{max_loss:,.2f}$\n"
+                f"میانگین س،ض: ‎{avg_profit:,.2f}‏|‎{avg_loss:,.2f}$\n"
+                # f"میانگین ریوارد: ‎{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}\n"
+                f"⛷️میانگین ریوارد: ‎{reward_ratio_str}\n"
+                f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
+                f"{broker_account_line}"
+                f"-------------------------------------------"
             )
-            historical_end_balance = (
-                f"{balance_at_period_end:,.2f}"
-                if balance_at_period_end and starting_balance_period
-                else Not_available
+
+            # داده‌های جدول
+            rows = [
+                ["شاخص", "بازه", "اکنون"],
+                ["موجودی", f"{starting_balance_period:,.2f}", Not_available],
+                [
+                    "موجودی پایان",
+                    historical_end_balance + current_balance,
+                    Not_available,
+                ],
+                ["اکوئیتی", Not_available, current_equity],  # تا اینجا فکر کنم درسته
+                [
+                    "سود خالص",
+                    f"{total_balance_change_period:,.2f}$",
+                    f"{true_total_account_profit:,.2f}$",
+                ],
+                ["رشد", f"{period_growth_str}", f"{total_growth_str}"],
+                [
+                    "حداکثر افت حساب",
+                    f"(%{period_drawdown_info.get('percent', 0):.2f})${period_drawdown_info.get('amount', 0):.2f}",
+                    f"(%{total_drawdown_info.get('percent', 0):.2f})${total_drawdown_info.get('amount', 0):.2f}",
+                ],
+                [
+                    "نرخ برد",
+                    f"({win_count}/{closed_trades_count})%{win_rate:.2f}",
+                    Not_available,
+                ],
+                [
+                    "نرخ برد واقعی",
+                    f"({real_win_count}/{real_win_count + real_loss_count})%{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}",
+                    Not_available,
+                ],
+                ["سر به سر", f"{breakeven_count}", Not_available],
+                ["بیشترین س،ض$", f"{max_loss:.2f},{max_profit:.2f}", Not_available],
+                ["میانگین س،ض$", f"{avg_loss:.2f},{avg_profit:.2f}", Not_available],
+                ["میانگین ریوارد", f"{reward_ratio_str}", Not_available],
+                ["تعداد معامله", f"{closed_trades_count}", Not_available],
+                ["کمیسیون", f"{commission:.2f}", Not_available],
+                ["سواپ", f"{swap:.2f}", Not_available],
+            ]
+
+            # طول بیشترین رشته برای ستون‌های عددی (ستون 2 و 3)
+            col_widths = [
+                max(len(str(row[0])) for row in rows),  # ستون اول فارسی
+                max(len(str(row[1])) for row in rows),  # ستون عددی وسط
+                max(len(str(row[2])) for row in rows),  # ستون عددی آخر
+            ]
+            # col_widths = [max(len(str(row[i])) for row in rows) for i in range(3)]
+
+            # logging.info(col_widths)
+            def format_number(val: str, width: int):
+                if val == Not_available:
+                    return val.rjust(width)
+
+                sign = ""
+                suffix = ""
+
+                # گرفتن علامت مثبت/منفی
+                if val.startswith(("+", "-")):
+                    sign, val = val[0], val[1:]
+
+                # گرفتن پسوند مثل % یا $
+                if val.endswith("%") or val.endswith("$"):
+                    suffix, val = val[-1], val[:-1]
+
+                # بازسازی با علامت چپ و پسوند راست
+                formatted = f"{suffix}{val}{sign}"
+
+                # راست‌چین کردن
+                return formatted.rjust(width)
+
+            # def format_row(row):
+            #     # ستون اول: بدون padding، ستون 2 و 3 راست‌چین
+            #     return f"`{str(row[0]).ljust(col_widths[0]-1)}|{str(row[1]).rjust(col_widths[1])}|{str(row[2]).rjust(col_widths[2])}`"
+            def format_row(row):
+                col1 = str(row[0]).ljust(col_widths[0])
+                col2 = format_number(str(row[1]), col_widths[1])
+                col3 = format_number(str(row[2]), col_widths[2])
+                return f"`{col1}|{col2}|{col3}`"
+
+            def make_title_line(title, total_width, sep_char="-"):
+                # طول متن عنوان با فاصله‌های قبل و بعد
+                title_text = f" {title} "
+                title_len = len(title_text)
+
+                # تعداد خط تیره‌های باقی‌مونده
+                dashes = total_width - title_len
+                left = dashes // 2
+                right = dashes - left
+
+                return "`" + (sep_char * left) + title_text + (sep_char * right) + "`"
+
+            # ساخت جدول
+            lines = []
+            total_width = sum(col_widths) + 2  # 6 برای ' | ' بین ستون‌ها
+            lines.append(make_title_line(f"گزارش {title}", total_width, "-"))
+            lines.append(
+                f"`بازه  : ‎{start_time.strftime('%Y/%m/%d')}-{display_end_time.strftime('%Y/%m/%d')}`"
             )
-            # این شرط تضمین می‌کند که یک روز از تاریخ پایان فقط و فقط زمانی کم شود که گزارش شما یک گزارش تاریخی باشد و زمان پایان آن دقیقاً ساعت ۰۰:۰۰ بامداد باشد.
-            # این کار باعث می‌شود که گزارش سفارشی شما (که زمان پایان آن ۲۳:۵۹ است) به درستی و بدون تغییر نمایش داده شود.
-            if end_time.time() == datetime.min.time():
-                display_end_time = end_time - timedelta(days=1)
-            else:
-                display_end_time = end_time
-            # برای گزارش‌های تاریخی، یک روز از تاریخ پایان کم می‌کنیم تا بازه درست نمایش داده شود
-            # display_end_time = end_time - timedelta(days=1)
+            lines.append(f"`حساب  : ‎{account_info.company} {account_info.login}`")
+            sep = "`" + "‏-" * total_width + "`"
+            # sep_char = "ـ"  # Tatweel
+            # sep = "`‏-`" * (sum(col_widths) + 0)
+            lines.append(sep)
+            lines.append(format_row(rows[0]))
+            lines.append(sep)
+            for row in rows[1:]:
+                lines.append(format_row(row))
+            lines.append(sep)
 
-        profit_line = f"**سود اکانت(حال):**‎`{true_total_account_profit:>8.2f}$`‏|**سود بازه:** ‎`{total_balance_change_period:,.2f}$`\n"
+            # ارسال به تلگرام بدون monospace
+            summary = "\n".join(lines)
+            # sent_msg = message.reply_text(summary)
 
-        # --- محاسبه درصد رشد کل اکانت ---
-        initial_deposit = account_info.balance - true_total_account_profit
-        total_growth_percentage = 0.0
-        if initial_deposit != 0:
-            total_growth_percentage = (
-                true_total_account_profit / initial_deposit
-            ) * 100
-        total_growth_sign = "+" if total_growth_percentage >= 0 else ""
-        total_growth_str = f"{total_growth_sign}{total_growth_percentage:.2f}%"
-
-        # --- محاسبه درصد رشد بازه زمانی ---
-        period_growth_percentage = 0.0
-        if starting_balance_period != 0:
-            period_growth_percentage = (
-                total_balance_change_period / starting_balance_period
-            ) * 100
-        period_growth_sign = "+" if period_growth_percentage >= 0 else ""
-        period_growth_str = f"{period_growth_sign}{period_growth_percentage:.2f}%"
-
-        growth_line = f"**درصد رشد اکانت(حال):**‎`{total_growth_str}`‏|**درصد رشد بازه:**‎`{period_growth_str}`\n"
-        broker_account_line = (
-            f"`{account_info.company} | {account_info.login}`\n" if account_info else ""
-        )
-
-        # --- بخش جدید: فراخوانی تابع دراودان برای دو حالت ---
-        # فراخوانی برای کل حساب
-        total_drawdown_info = calculate_drawdown_for_period(
-            all_deals_for_drawdown, datetime(2000, 1, 1, tzinfo=pytz.utc), end_time
-        )
-        # فراخوانی برای بازه گزارش
-        period_drawdown_info = calculate_drawdown_for_period(
-            all_deals_for_drawdown, start_time, end_time
-        )
-        drawdown_line = (
-            f"**دراودان کل:** `‎{total_drawdown_info['amount']:.2f}$`‏ | ‎(`{total_drawdown_info['percent']:.2f}%`)\n"
-            f"**دراودان بازه:** `‎{period_drawdown_info['amount']:.2f}$`‏ | ‎(`{period_drawdown_info['percent']:.2f}%`)\n"
-        )
-        reward_ratio = (avg_profit / abs(avg_loss)) if avg_loss != 0 else None
-        reward_ratio_str = f"{reward_ratio:.2f}" if reward_ratio is not None else "---"
-
-        summary_old = (
-            f"**📊 گزارش {title}**\n"
-            f"_{start_time.strftime('%Y/%m/%d')} - {display_end_time.strftime('%Y/%m/%d')}_\n\n"
-            f"{actual_date_report}"
-            f"{balance_equity_line}"
-            f"{profit_line}"
-            f"{drawdown_line}"
-            f"{growth_line}"
-            f"کمیسیون بازه:`‎{commission:.2f}`‏|سواپ بازه:‎`{swap:.2f}`\n"
-            f"**نرخ برد بازه:**‎`{win_rate:.2f}%` ‏({win_count}/{closed_trades_count})\n"
-            f"**نرخ برد واقعی:**`‎{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}%` ‏({real_win_count}/{real_win_count + real_loss_count})\n"
-            f"**معاملات سر به سر:** `{breakeven_count}`\n"
-            f"بیشترین س،ض: ‎{max_profit:,.2f}‏|‎{max_loss:,.2f}$\n"
-            f"میانگین س،ض: ‎{avg_profit:,.2f}‏|‎{avg_loss:,.2f}$\n"
-            # f"میانگین ریوارد: ‎{(avg_profit / abs(avg_loss)) if avg_loss != 0 else '':.2f}\n"
-            f"میانگین ریوارد: ‎{reward_ratio_str}\n"
-            f"**ت. پوزیشن‌های بازه:**`{closed_trades_count}`\n"
-            f"{broker_account_line}"
-            f"-----------------------------------"
-        )
-
-        # داده‌های جدول
-        rows = [
-            ["شاخص", "بازه", "اکنون"],
-            ["موجودی", f"{starting_balance_period:,.2f}", Not_available],
-            ["موجودی پایان", historical_end_balance + current_balance, Not_available],
-            ["اکوئیتی", Not_available, current_equity],  # تا اینجا فکر کنم درسته
-            [
-                "سود خالص",
-                f"{total_balance_change_period:,.2f}$",
-                f"{true_total_account_profit:,.2f}$",
-            ],
-            ["رشد", f"{period_growth_str}", f"{total_growth_str}"],
-            [
-                "حداکثر افت حساب",
-                f"(%{period_drawdown_info.get('percent', 0):.2f})${period_drawdown_info.get('amount', 0):.2f}",
-                f"(%{total_drawdown_info.get('percent', 0):.2f})${total_drawdown_info.get('amount', 0):.2f}",
-            ],
-            [
-                "نرخ برد",
-                f"({win_count}/{closed_trades_count})%{win_rate:.2f}",
-                Not_available,
-            ],
-            [
-                "نرخ برد واقعی",
-                f"({real_win_count}/{real_win_count + real_loss_count})%{((real_win_count / (real_win_count + real_loss_count) * 100) if (real_win_count + real_loss_count) > 0 else 0):.2f}",
-                Not_available,
-            ],
-            ["سر به سر", f"{breakeven_count}", Not_available],
-            ["بیشترین س،ض$", f"{max_loss:.2f},{max_profit:.2f}", Not_available],
-            ["میانگین س،ض$", f"{avg_loss:.2f},{avg_profit:.2f}", Not_available],
-            ["میانگین ریوارد", f"{reward_ratio_str}", Not_available],
-            ["تعداد معامله", f"{closed_trades_count}", Not_available],
-            ["کمیسیون", f"{commission:.2f}", Not_available],
-            ["سواپ", f"{swap:.2f}", Not_available],
-        ]
-
-        # طول بیشترین رشته برای ستون‌های عددی (ستون 2 و 3)
-        col_widths = [
-            max(len(str(row[0])) for row in rows),  # ستون اول فارسی
-            max(len(str(row[1])) for row in rows),  # ستون عددی وسط
-            max(len(str(row[2])) for row in rows),  # ستون عددی آخر
-        ]
-        # col_widths = [max(len(str(row[i])) for row in rows) for i in range(3)]
-
-        # logging.info(col_widths)
-        def format_number(val: str, width: int):
-            if val == Not_available:
-                return val.rjust(width)
-
-            sign = ""
-            suffix = ""
-
-            # گرفتن علامت مثبت/منفی
-            if val.startswith(("+", "-")):
-                sign, val = val[0], val[1:]
-
-            # گرفتن پسوند مثل % یا $
-            if val.endswith("%") or val.endswith("$"):
-                suffix, val = val[-1], val[:-1]
-
-            # بازسازی با علامت چپ و پسوند راست
-            formatted = f"{suffix}{val}{sign}"
-
-            # راست‌چین کردن
-            return formatted.rjust(width)
-
-        # def format_row(row):
-        #     # ستون اول: بدون padding، ستون 2 و 3 راست‌چین
-        #     return f"`{str(row[0]).ljust(col_widths[0]-1)}|{str(row[1]).rjust(col_widths[1])}|{str(row[2]).rjust(col_widths[2])}`"
-        def format_row(row):
-            col1 = str(row[0]).ljust(col_widths[0])
-            col2 = format_number(str(row[1]), col_widths[1])
-            col3 = format_number(str(row[2]), col_widths[2])
-            return f"`{col1}|{col2}|{col3}`"
-
-        def make_title_line(title, total_width, sep_char="-"):
-            # طول متن عنوان با فاصله‌های قبل و بعد
-            title_text = f" {title} "
-            title_len = len(title_text)
-
-            # تعداد خط تیره‌های باقی‌مونده
-            dashes = total_width - title_len
-            left = dashes // 2
-            right = dashes - left
-
-            return "`" + (sep_char * left) + title_text + (sep_char * right) + "`"
-
-        # ساخت جدول
-        lines = []
-        total_width = sum(col_widths) + 2  # 6 برای ' | ' بین ستون‌ها
-        lines.append(make_title_line(f"گزارش {title}", total_width, "-"))
-        lines.append(
-            f"`بازه  : ‎{start_time.strftime('%Y/%m/%d')}-{display_end_time.strftime('%Y/%m/%d')}`"
-        )
-        lines.append(f"`حساب  : ‎{account_info.company} {account_info.login}`")
-        sep = "`" + "‏-" * total_width + "`"
-        # sep_char = "ـ"  # Tatweel
-        # sep = "`‏-`" * (sum(col_widths) + 0)
-        lines.append(sep)
-        lines.append(format_row(rows[0]))
-        lines.append(sep)
-        for row in rows[1:]:
-            lines.append(format_row(row))
-        lines.append(sep)
-
-        # ارسال به تلگرام بدون monospace
-        summary = "\n".join(lines)
-        # sent_msg = message.reply_text(summary)
-
-    sent_msg = message.reply_text(summary_old, parse_mode="Markdown")
-    if sent_msg:
-        sent_messages_info.append({"id": sent_msg.message_id, "text": summary_old})
-    sent_msg = message.reply_text(summary, parse_mode="Markdown")
-    if sent_msg:
-        sent_messages_info.append({"id": sent_msg.message_id, "text": summary})
-    time.sleep(1)
-    if mode == "full":
-        # --- بخش جدید: اضافه کردن هدر ---
-        prompt_text = f"#N| Symbol | lot   |          Profit | Date"
-        sent_msg = message.reply_text(prompt_text, parse_mode="Markdown")
+        sent_msg = message.reply_text(summary_old, parse_mode="Markdown")
         if sent_msg:
-            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
-
-        CHUNK_SIZE = 40
-        for i in range(0, len(report_lines), CHUNK_SIZE):
-            chunk = report_lines[i : i + CHUNK_SIZE]
-            message_part = "\n".join(chunk)
-            sent_msg = message.reply_text(message_part, parse_mode="Markdown")
+            sent_messages_info.append({"id": sent_msg.message_id, "text": summary_old})
+        # sent_msg = message.reply_text(summary, parse_mode="Markdown")
+        # if sent_msg:
+        #     sent_messages_info.append({"id": sent_msg.message_id, "text": summary})
+        time.sleep(1)
+        if mode == "full":
+            # --- بخش جدید: اضافه کردن هدر ---
+            prompt_text = f"#N| Symbol | lot   |          Profit | Date"
+            sent_msg = message.reply_text(prompt_text, parse_mode="Markdown")
             if sent_msg:
                 sent_messages_info.append(
-                    {"id": sent_msg.message_id, "text": message_part}
+                    {"id": sent_msg.message_id, "text": prompt_text}
                 )
-            time.sleep(1)
 
-    # ساخت لیست تمیز از پوزیشن‌های نهایی برای ارسال به تابع نمودار
-    fully_closed_positions = [pos_data for position_id, pos_data in sorted_positions]
-    # فراخوانی تابع برای ساخت و ارسال نمودار
-    create_and_send_growth_chart(
-        message, context, fully_closed_positions, starting_balance_period, title
-    )
-    prompt_text = "End report.\nmonitoring continue..."
-    sent_msg = message.reply_text(prompt_text)
-    if sent_msg:
-        sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
-    process_messages_for_clearing(sent_messages_info)
+            CHUNK_SIZE = 40
+            for i in range(0, len(report_lines), CHUNK_SIZE):
+                chunk = report_lines[i : i + CHUNK_SIZE]
+                message_part = "\n".join(chunk)
+                sent_msg = message.reply_text(message_part, parse_mode="Markdown")
+                if sent_msg:
+                    sent_messages_info.append(
+                        {"id": sent_msg.message_id, "text": message_part}
+                    )
+                time.sleep(1)
+
+        # ساخت لیست تمیز از پوزیشن‌های نهایی برای ارسال به تابع نمودار
+        fully_closed_positions = [
+            pos_data for position_id, pos_data in sorted_positions
+        ]
+        # فراخوانی تابع برای ساخت و ارسال نمودار
+        create_and_send_growth_chart(
+            message, context, fully_closed_positions, starting_balance_period, title
+        )
+        prompt_text = "End report.\nmonitoring continue..."
+        sent_msg = message.reply_text(prompt_text)
+        if sent_msg:
+            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
+        process_messages_for_clearing(sent_messages_info)
+
+        # حذف داده‌های بزرگ
+        deals = None
+        all_deals_for_drawdown = None
+        sorted_positions = None
+        report_lines = None
+        fully_closed_positions = None
+        # # 🔥 آزادسازی حافظه بعد از اتمام گزارش
+        # _cleanup_after_report()
+
+
+@contextmanager
+def _cleanup_after_report():
+    """مدیریت خودکار حافظه برای گزارش‌گیری"""
+    try:
+        yield
+    finally:
+        import gc
+
+        try:
+            import matplotlib.pyplot as plt
+
+            plt.close("all")
+            plt.clf()
+            plt.cla()
+        except:
+            pass
+        gc.collect()
+        logging.info("🧹 Report memory cleaned")
+        log_memory_usage("After report cleanup")
 
 
 # ====================== رسم نمودار رشد ======================
 def create_and_send_growth_chart(
     message, context, fully_closed_positions, starting_balance, title
 ):
-    sent_messages_info = []
-    """نمودار رشد حساب را ساخته و به تلگرام ارسال می‌کند."""
-    logging.info("Creating growth chart...")
+    with _cleanup_chart_memory():
+        sent_messages_info = []
+        """نمودار رشد حساب را ساخته و به تلگرام ارسال می‌کند."""
+        logging.info("Creating growth chart...")
 
-    # # ۱. آماده‌سازی داده‌ها
-    # dates = []
-    # cumulative_profit = []
-    # current_equity = starting_balance
+        # # ۱. آماده‌سازی داده‌ها
+        # dates = []
+        # cumulative_profit = []
+        # current_equity = starting_balance
 
-    # # مرتب کردن معاملات بر اساس زمان
-    closed_deals = fully_closed_positions  # sorted([d for d in fully_closed_positions if d.entry == mt5.DEAL_ENTRY_OUT], key=lambda x: x.time)
+        # # مرتب کردن معاملات بر اساس زمان
+        closed_deals = fully_closed_positions  # sorted([d for d in fully_closed_positions if d.entry == mt5.DEAL_ENTRY_OUT], key=lambda x: x.time)
 
-    # if not sorted_deals:
-    #     logging.warning("No closing deals to chart.")
-    #     return
+        # if not sorted_deals:
+        #     logging.warning("No closing deals to chart.")
+        #     return
 
-    # # اضافه کردن نقطه شروع نمودار
-    # dates.append(datetime.fromtimestamp(sorted_deals[0].time - 1))
-    # cumulative_profit.append(starting_balance)
+        # # اضافه کردن نقطه شروع نمودار
+        # dates.append(datetime.fromtimestamp(sorted_deals[0].time - 1))
+        # cumulative_profit.append(starting_balance)
 
-    # # محاسبه سود تجمعی برای هر معامله
-    # for deal in sorted_deals:
-    #     current_equity += deal.profit + deal.commission + deal.swap
-    #     dates.append(datetime.fromtimestamp(deal.time))
-    #     cumulative_profit.append(current_equity)
+        # # محاسبه سود تجمعی برای هر معامله
+        # for deal in sorted_deals:
+        #     current_equity += deal.profit + deal.commission + deal.swap
+        #     dates.append(datetime.fromtimestamp(deal.time))
+        #     cumulative_profit.append(current_equity)
 
-    # ۱. آماده‌سازی داده‌ها برای محور افقی بر اساس تعداد معاملات
-    trade_numbers = []
-    cumulative_profit = []
-    current_equity = starting_balance
+        # ۱. آماده‌سازی داده‌ها برای محور افقی بر اساس تعداد معاملات
+        trade_numbers = []
+        cumulative_profit = []
+        current_equity = starting_balance
 
-    if not closed_deals:
-        logging.warning("No closing deals to chart.")
-        prompt_text = "در بازه زمانی گزارش هیچ پوزیشنی بسته نشده است."
-        sent_msg = message.reply_text(prompt_text)
-        if sent_msg:
-            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
+        if not closed_deals:
+            logging.warning("No closing deals to chart.")
+            prompt_text = "در بازه زمانی گزارش هیچ پوزیشنی بسته نشده است."
+            sent_msg = message.reply_text(prompt_text)
+            if sent_msg:
+                sent_messages_info.append(
+                    {"id": sent_msg.message_id, "text": prompt_text}
+                )
+            process_messages_for_clearing(sent_messages_info)
+            return
+
+        # اضافه کردن نقطه شروع نمودار (معامله شماره صفر)
+        trade_numbers.append(0)
+        cumulative_profit.append(starting_balance)
+
+        # محاسبه سود تجمعی برای هر معامله
+        for i, position_data in enumerate(closed_deals):
+            # --- این خط را برای دیباگ اضافه کنید ---
+            # logging.info(f"Trade #{i+1}: current_equity_before={current_equity}, profit_to_add={position_data['profit']}")
+            current_equity += position_data[
+                "profit"
+            ]  # + position_data['commission'] + position_data['swap']
+            trade_numbers.append(i + 1)  # شماره معامله (۱، ۲، ۳، ...)
+            cumulative_profit.append(current_equity)
+        # --- این شرط حیاتی را اضافه کنید ---
+        if len(trade_numbers) < 4:
+            logging.warning("Not enough data to create a chart.")
+            prompt_text = "تعداد معاملات برای رسم نمودار کافی نیست."
+            sent_msg = message.reply_text(prompt_text)
+            if sent_msg:
+                sent_messages_info.append(
+                    {"id": sent_msg.message_id, "text": prompt_text}
+                )
+            process_messages_for_clearing(sent_messages_info)
+            # در صورت تمایل می‌توانید یک پیام مناسب به کاربر تلگرام بفرستید
+            # sent_msg = message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
+            return  # از ادامه تابع و بروز خطا جلوگیری می‌کند
+
+        # ۲. رسم نمودار با خطوط منحنی و نرم
+        # تبدیل لیست‌های عادی به آرایه‌های NumPy برای محاسبات
+        x_original = np.array(trade_numbers)
+        y_original = np.array(cumulative_profit)
+
+        # ایجاد نقاط بسیار بیشتر برای رسم یک منحنی نرم
+        x_smooth = np.linspace(x_original.min(), x_original.max(), 400)
+
+        # ساخت مدل ریاضی (spline) و محاسبه مقادیر y برای نقاط جدید
+        spl = make_interp_spline(x_original, y_original, k=3)  # k=3 for a cubic spline
+        y_smooth = spl(x_smooth)
+
+        # ۲. رسم نمودار با کیفیت و اندازه بزرگ
+        plt.figure(figsize=(12, 7), dpi=150)  # اندازه ۱۲x۷ اینچ با کیفیت ۱۵۰ DPI
+
+        # اگر سود نهایی مثبت بود، نمودار سبز باشد، در غیر این صورت قرمز
+        line_color = "green" if current_equity >= starting_balance else "red"
+
+        # رسم منحنی نرم
+        plt.plot(x_smooth, y_smooth, color=line_color, linewidth=0.4)
+
+        # اضافه کردن نقاط معاملات اصلی روی منحنی
+        plt.scatter(
+            x_original, y_original, color=line_color, s=1
+        )  # s=1 for marker size
+
+        # تغییر: رسم بر اساس شماره معامله به جای تاریخ
+        # plt.plot(trade_numbers, cumulative_profit, linestyle='-', color=line_color, marker='.', markersize=1, linewidth=0.4, label='Cumulative Profit')
+
+        # این خط دیگر نیازی نیست و باید حذف یا کامنت شود
+        # plt.xticks(rotation=45)
+        # --- بخش جدید: آماده‌سازی متن فارسی برای نمایش صحیح ---
+        # ابتدا متن فارسی را برای اتصال حروف، آماده می‌کنیم
+        reshaped_title_text = arabic_reshaper.reshape(f"نمودار رشد: {title}")
+        # سپس، متن آماده شده را از راست به چپ مرتب می‌کنیم
+        bidi_title_text = get_display(reshaped_title_text)
+
+        # زیباسازی نمودار
+        plt.title(bidi_title_text, fontsize=16, fontname="Tahoma")
+        plt.xlabel("trade number", fontsize=6)
+        plt.ylabel("balance", fontsize=6)
+        plt.grid(True, linestyle="--", alpha=0.2)
+
+        # --- بخش جدید: تنظیم هوشمند محورها ---
+        ax = plt.gca()  # گرفتن محورهای فعلی نمودار
+
+        # محور افقی (تعداد معاملات) را طوری تنظیم کن که حداکثر 100 عدد صحیح نمایش دهد
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=100, integer=True))
+        plt.xticks(fontname="calibri", fontsize=6, rotation=80)
+        # --- تغییر کلیدی: تنظیم نقطه شروع محور افقی ---
+        plt.xlim(left=0)  # محور افقی را مجبور کن که از صفر شروع شود
+
+        # محور عمودی (ارزش حساب) را طوری تنظیم کن که حداکثر 50 عدد خوانا نمایش دهد
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=50))
+        plt.yticks(fontname="calibri", fontsize=6)
+
+        # --- تغییر کلیدی: تنظیم دستی پرش اعداد در محور افقی ---
+        # تنظیم اعداد محور افقی با فونت مشخص
+        # plt.xticks(range(0, len(trade_numbers), 1), fontname='calibri', fontsize=6)
+        # --- تغییر کلیدی: تنظیم دستی پرش اعداد در محور عمودی ---
+        # تنظیم اعداد محور عمودی با فونت مشخص
+        # plt.yticks(range(int(min(cumulative_profit)), int(max(cumulative_profit)) + 100, 20), fontname='calibri', fontsize=6)
+        plt.tight_layout()  # برای جلوگیری از بریده شدن برچسب‌ها
+
+        # ۳. ذخیره نمودار در حافظه RAM
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+
+        # ۴. ارسال تصویر به تلگرام
+        logging.info("Sending chart to Telegram...")
+        send_msg = message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
+        if send_msg:
+            sent_messages_info.append(
+                {"id": send_msg.message_id, "text": f"نمودار رشد: {title}"}
+            )
+        # بستن نمودار برای آزاد کردن حافظه
+        plt.close()
+        buf.close()
+        logging.info("RAM freed.")
+        logging.info("Monitoring continue...")
         process_messages_for_clearing(sent_messages_info)
-        return
 
-    # اضافه کردن نقطه شروع نمودار (معامله شماره صفر)
-    trade_numbers.append(0)
-    cumulative_profit.append(starting_balance)
+        # حذف داده‌های بزرگ
+        position_data = None
+        closed_deals = None
+        trade_numbers = None
+        # # 🔥 آزادسازی حافظه فوری بعد از ارسال نمودار
+        # _cleanup_chart_memory()
 
-    # محاسبه سود تجمعی برای هر معامله
-    for i, position_data in enumerate(closed_deals):
-        # --- این خط را برای دیباگ اضافه کنید ---
-        # logging.info(f"Trade #{i+1}: current_equity_before={current_equity}, profit_to_add={position_data['profit']}")
-        current_equity += position_data[
-            "profit"
-        ]  # + position_data['commission'] + position_data['swap']
-        trade_numbers.append(i + 1)  # شماره معامله (۱، ۲، ۳، ...)
-        cumulative_profit.append(current_equity)
-    # --- این شرط حیاتی را اضافه کنید ---
-    if len(trade_numbers) < 4:
-        logging.warning("Not enough data to create a chart.")
-        prompt_text = "تعداد معاملات برای رسم نمودار کافی نیست."
-        sent_msg = message.reply_text(prompt_text)
-        if sent_msg:
-            sent_messages_info.append({"id": sent_msg.message_id, "text": prompt_text})
-        process_messages_for_clearing(sent_messages_info)
-        # در صورت تمایل می‌توانید یک پیام مناسب به کاربر تلگرام بفرستید
-        # sent_msg = message.reply_text("تعداد معاملات برای رسم نمودار کافی نیست.")
-        return  # از ادامه تابع و بروز خطا جلوگیری می‌کند
 
-    # ۲. رسم نمودار با خطوط منحنی و نرم
-    # تبدیل لیست‌های عادی به آرایه‌های NumPy برای محاسبات
-    x_original = np.array(trade_numbers)
-    y_original = np.array(cumulative_profit)
+@contextmanager
+def _cleanup_chart_memory():
+    """آزادسازی حافظه مربوط به نمودار"""
+    try:
+        yield
+    finally:
+        import gc
 
-    # ایجاد نقاط بسیار بیشتر برای رسم یک منحنی نرم
-    x_smooth = np.linspace(x_original.min(), x_original.max(), 400)
+        # تمیزکاری matplotlib
+        try:
+            import matplotlib.pyplot as plt
 
-    # ساخت مدل ریاضی (spline) و محاسبه مقادیر y برای نقاط جدید
-    spl = make_interp_spline(x_original, y_original, k=3)  # k=3 for a cubic spline
-    y_smooth = spl(x_smooth)
+            plt.close("all")
+            plt.clf()
+            plt.cla()
+        except:
+            pass
 
-    # ۲. رسم نمودار با کیفیت و اندازه بزرگ
-    plt.figure(figsize=(12, 7), dpi=150)  # اندازه ۱۲x۷ اینچ با کیفیت ۱۵۰ DPI
-
-    # اگر سود نهایی مثبت بود، نمودار سبز باشد، در غیر این صورت قرمز
-    line_color = "green" if current_equity >= starting_balance else "red"
-
-    # رسم منحنی نرم
-    plt.plot(x_smooth, y_smooth, color=line_color, linewidth=0.4)
-
-    # اضافه کردن نقاط معاملات اصلی روی منحنی
-    plt.scatter(x_original, y_original, color=line_color, s=1)  # s=1 for marker size
-
-    # تغییر: رسم بر اساس شماره معامله به جای تاریخ
-    # plt.plot(trade_numbers, cumulative_profit, linestyle='-', color=line_color, marker='.', markersize=1, linewidth=0.4, label='Cumulative Profit')
-
-    # این خط دیگر نیازی نیست و باید حذف یا کامنت شود
-    # plt.xticks(rotation=45)
-    # --- بخش جدید: آماده‌سازی متن فارسی برای نمایش صحیح ---
-    # ابتدا متن فارسی را برای اتصال حروف، آماده می‌کنیم
-    reshaped_title_text = arabic_reshaper.reshape(f"نمودار رشد: {title}")
-    # سپس، متن آماده شده را از راست به چپ مرتب می‌کنیم
-    bidi_title_text = get_display(reshaped_title_text)
-
-    # زیباسازی نمودار
-    plt.title(bidi_title_text, fontsize=16, fontname="Tahoma")
-    plt.xlabel("trade number", fontsize=6)
-    plt.ylabel("balance", fontsize=6)
-    plt.grid(True, linestyle="--", alpha=0.2)
-
-    # --- بخش جدید: تنظیم هوشمند محورها ---
-    ax = plt.gca()  # گرفتن محورهای فعلی نمودار
-
-    # محور افقی (تعداد معاملات) را طوری تنظیم کن که حداکثر 100 عدد صحیح نمایش دهد
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=100, integer=True))
-    plt.xticks(fontname="calibri", fontsize=6, rotation=80)
-    # --- تغییر کلیدی: تنظیم نقطه شروع محور افقی ---
-    plt.xlim(left=0)  # محور افقی را مجبور کن که از صفر شروع شود
-
-    # محور عمودی (ارزش حساب) را طوری تنظیم کن که حداکثر 50 عدد خوانا نمایش دهد
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=50))
-    plt.yticks(fontname="calibri", fontsize=6)
-
-    # --- تغییر کلیدی: تنظیم دستی پرش اعداد در محور افقی ---
-    # تنظیم اعداد محور افقی با فونت مشخص
-    # plt.xticks(range(0, len(trade_numbers), 1), fontname='calibri', fontsize=6)
-    # --- تغییر کلیدی: تنظیم دستی پرش اعداد در محور عمودی ---
-    # تنظیم اعداد محور عمودی با فونت مشخص
-    # plt.yticks(range(int(min(cumulative_profit)), int(max(cumulative_profit)) + 100, 20), fontname='calibri', fontsize=6)
-    plt.tight_layout()  # برای جلوگیری از بریده شدن برچسب‌ها
-
-    # ۳. ذخیره نمودار در حافظه RAM
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-
-    # ۴. ارسال تصویر به تلگرام
-    logging.info("Sending chart to Telegram...")
-    send_msg = message.reply_photo(photo=buf, caption=f"نمودار رشد: {title}")
-    if send_msg:
-        sent_messages_info.append(
-            {"id": send_msg.message_id, "text": f"نمودار رشد: {title}"}
-        )
-    # بستن نمودار برای آزاد کردن حافظه
-    plt.close()
-    buf.close()
-    logging.info("RAM freed.")
-    logging.info("Monitoring continue...")
-    process_messages_for_clearing(sent_messages_info)
+        # garbage collector
+        gc.collect()
+        logging.info("🧹 Chart memory cleaned")
 
 
 # ============================================== گزارش روزانه ===========================================================
@@ -2015,6 +2858,21 @@ def clear_alerts(update, context):
     logging.info(
         f"Del:{deleted_count},FP:{failed_permanently_count},FT:{failed_temporarily_count},R:{remaining_count}."
     )
+    # 🔥 آزادسازی حافظه بعد از پاک‌سازی
+    _cleanup_alert_memory()
+
+
+def _cleanup_alert_memory():
+    """آزادسازی حافظه مربوط به هشدارها"""
+    import gc
+
+    # اگر لیست هشدارها خیلی بزرگ شده، می‌توانید آن را trim کنید
+    global alert_message_ids
+    if len(alert_message_ids) > 1000:  # محدود کردن سایز لیست
+        alert_message_ids = alert_message_ids[-500:]  # نگه داشتن آخرین 500 تا
+
+    gc.collect()
+    logging.info("🧹 Alert memory cleaned")
 
 
 def process_messages_for_clearing(sent_messages_info):
@@ -2036,11 +2894,18 @@ def process_messages_for_clearing(sent_messages_info):
 
 # ====================== تابع اصلی مانیتورینگ ======================
 def main():
+    # +++ این دو خط را اضافه کنید +++
+    setup_database()  # پایگاه داده را آماده می‌کند
+    global alert_message_ids
+    alert_message_ids = load_ids_from_db()  # شناسه‌های قدیمی را بارگذاری می‌کند
+
     # --- تغییر کلیدی: راه‌اندازی وب‌سرور در یک ترد پس‌زمینه ---
-    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+    flask_thread = threading.Thread(
+        target=run_flask_server, daemon=True, name="Flask_Thread"
+    )
     flask_thread.start()
     logging.info("Alert Server is running.")
-
+    setup_smtp_server()  # راه‌اندازی سرور SMTP
     # این حلقه تا زمانی که اینترنت آماده شود، ادامه دارد
     while True:
         # تلاش برای راه‌اندازی شنونده تلگرام
@@ -2079,10 +2944,11 @@ def main():
                 fallbacks=[CommandHandler("cancel", cancel_conversation)],
             )
             # ^-- پایان بلوک کد جدید --^
-
             dispatcher.add_handler(conv_handler)
             dispatcher.add_handler(single_day_conv_handler)
             dispatcher.add_handler(CallbackQueryHandler(report_button_handler))
+            # در بخش main بعد از ایجاد dispatcher
+            dispatcher.add_handler(CommandHandler("test_email", test_email_command))
             dispatcher.add_handler(CommandHandler("clear", clear_alerts))
             dispatcher.add_handler(CommandHandler("time", _24H_report))
             dispatcher.add_handler(CommandHandler("today", today_report))
@@ -2100,6 +2966,10 @@ def main():
             dispatcher.add_handler(CommandHandler("lastmonth", last_month_report))
             dispatcher.add_handler(CommandHandler("last2months", last_2_months_report))
             dispatcher.add_handler(CommandHandler("last3months", last_3_months_report))
+            # در تابع main
+            dispatcher.add_handler(CommandHandler("start_float", start_floating_window))
+            dispatcher.add_handler(CommandHandler("stop_float", stop_floating_window))
+            dispatcher.add_handler(CommandHandler("float_status", floating_status))
             dispatcher.add_error_handler(handle_error)
             # اگر همه چیز موفق بود، از حلقه راه‌اندازی خارج می‌شویم
             updater.start_polling()  # راه اندازی شنونده
@@ -2112,10 +2982,6 @@ def main():
             logging.error(f"initial listener run fail Retrying in 10 seconds...")
             time.sleep(10)
             continue
-        # +++ این دو خط را اضافه کنید +++
-    setup_database()  # پایگاه داده را آماده می‌کند
-    global alert_message_ids
-    alert_message_ids = load_ids_from_db()  # شناسه‌های قدیمی را بارگذاری می‌کند
 
     is_connected = False
     disconnect_time = None
@@ -2152,7 +3018,7 @@ def main():
                     raise ConnectionError("Failed to get server time. retry...")
                 new_deals = mt5.history_deals_get(last_check_time, current_time)
                 last_check_time = current_time
-
+                time.sleep(0.1)  # ⬅️ فقط 0.1 ثانیه!برای نرم‌تر کردن بار استفاده از CPU
                 if new_deals:
                     for deal in new_deals:
                         if deal.ticket in processed_deals:
@@ -2339,6 +3205,7 @@ if __name__ == "__main__":
         logging.info("Retrying timezone detection in 10 seconds...")
         time.sleep(10)
     # +++ حلقه نگهبان برای اجرای بی‌پایان اسکریپت +++
+try:
     while True:
         # حالا که منطقه زمانی با موفقیت پیدا شده، برنامه اصلی را اجرا کن
         try:
@@ -2371,12 +3238,47 @@ if __name__ == "__main__":
             logging.info("Restarting the script(30s)...")
             time.sleep(30)
             # سپس حلقه نگهبان دوباره main() را اجرا می‌کند
+finally:
+    # === این بخش حیاتی است ===
+    # این کد *همیشه* هنگام خروج از بلوک try اجرا می‌شود
+    # (یعنی زمانی که KeyboardInterrupt باعث 'break' شده است)
 
+    # logging.info("Gracefully shutting down all components...")
+
+    # 1. توقف پنجره شناور (اگر در حال اجرا باشد)
+    # (با فرض اینکه floating_profit یک متغیر سراسری است)
+    # if "floating_profit" in globals() and floating_profit.is_monitoring:
+    #     logging.info("Stopping floating profit window...")
+    #     floating_profit.stop_monitoring()
+    #     # --- بخش حیاتی: منتظر بمانید تا نخ GUI تمام شود ---
+    #     if floating_profit.gui_thread and floating_profit.gui_thread.is_alive():
+    #         logging.info("Waiting for GUI thread to finish...")
+    #         floating_profit.gui_thread.join(timeout=3)
+    #     logging.info("Floating window stopped.")
+
+    # 1. خاموش کردن تضمینی پنجره شناور (با انتظار)
+    if "floating_profit" in globals():
+        floating_profit.clean_exit()  # <--- استفاده از متد جدید
+    # 2. توقف شنونده تلگرام
     if updater and updater.running:
-        # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
-        logging.info("{wait}Stopping updater...")
+        logging.info("Stopping updater...")
         updater.stop()
         logging.info("Updater stopped.")
+
+    # 3. قطع اتصال از MT5
     if mt5.terminal_info():
+        logging.info("Shutting down MT5 connection...")
         mt5.shutdown()
+        logging.info("MT5 connection shut down.")
+
+    # نخ Flask چون daemon=True است، به طور خودکار بسته خواهد شد
     logging.info("Script exited gracefully.")
+    # check_active_threads()  # <--- بررسی نهایی
+# if updater and updater.running:
+#     # تغییر ۳: در نهایت، چه با خطا و چه با Ctrl+C، شنونده را متوقف می‌کنیم
+#     logging.info("{wait}Stopping updater...")
+#     updater.stop()
+#     logging.info("Updater stopped.")
+# if mt5.terminal_info():
+#     mt5.shutdown()
+# logging.info("Script exited gracefully.")
