@@ -2,7 +2,6 @@ config.ini
 bot_data.db
 bot_script-osi label.py
 bot_script smtp.py
-bot_script smtp.png
 bot_script-bak.py
 active_threads.py
 bot_script-bak1.py
