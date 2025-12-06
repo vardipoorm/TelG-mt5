@@ -53,6 +53,9 @@ last2weeks - گزارش دو هفته ی گذشته
 lastmonth - گزارش ماه گذشته
 last2months - گزارش دو ماه گذشته
 last3months - گزارش سه ماه گذشته
+start_float - نمایش سود روی مانیتور
+stop_float - عدم نمایش سود
+float_status - وضعیت پنجره
 ```
 باید این تایید رو دریافت کنید
 ```bash
