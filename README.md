@@ -53,6 +53,9 @@ last2weeks - گزارش دو هفته ی گذشته
 lastmonth - گزارش ماه گذشته
 last2months - گزارش دو ماه گذشته
 last3months - گزارش سه ماه گذشته
+start_float - نمایش سود روی مانیتور
+stop_float - عدم نمایش سود
+float_status - وضعیت پنجره
 ```
 باید این تایید رو دریافت کنید
 ```bash
@@ -77,8 +80,7 @@ Success! Command list updated. /help
 ```bash
 pip install pip-review
 pip-review --auto
-pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask colorlog
-
+pip install MetaTrader5 "python-telegram-bot==13.15" pytz python-dateutil psutil matplotlib numpy scipy arabic_reshaper python-bidi flask colorlog aiosmtpd pillow
 ```
 ### قدم سوم: تنظیمات اسکریپت
 راهنمای پیکربندی:
