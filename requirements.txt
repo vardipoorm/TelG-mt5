@@ -10,3 +10,5 @@ arabic_reshaper
 python-bidi
 flask
 colorlog
+aiosmtpd
+pillow
