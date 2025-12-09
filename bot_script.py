@@ -830,7 +830,8 @@ class QuietSMTPHandler:
 
             # ارسال به تلگرام
             telegram_message = (
-                f"**📧 MT5 Alert**\n\n**Subject:** {subject}\n**Message:** {body}"
+                # f"**📧 MT5 Alert**\n\n**Subject:** {subject}\n**Message:** {body}"
+                f"{subject}\n{body}"
             )
 
             sent_msg = self.bot.send_message(
@@ -884,9 +885,7 @@ class TelegramHandler:
                 body = msg.get_content()
 
             # ساخت پیام برای تلگرام
-            telegram_message = (
-                f"**📧 MT5 Alert**\n\n**Subject:** {subject}\n**Message:** {body}"
-            )
+            telegram_message = f"{subject}\n{body}"
 
             # ارسال به تلگرام
             sent_msg = self.bot.send_message(
