@@ -2893,6 +2893,7 @@ def process_messages_for_clearing(sent_messages_info):
 
 # ====================== تابع اصلی مانیتورینگ ======================
 def main():
+    floating_profit.start_monitoring()
     # +++ این دو خط را اضافه کنید +++
     setup_database()  # پایگاه داده را آماده می‌کند
     global alert_message_ids
