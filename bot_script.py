@@ -524,7 +524,9 @@ class FloatingProfitWindow:
 
                 # ... ادامه منطق برنامه برای محاسبه سود، آپدیت نمایش و ...
                 # ...
-                total_profit = sum(pos.profit for pos in positions)
+                total_profit_sum = sum(pos.profit for pos in positions)
+                total_swap_sum = sum(pos.swap for pos in positions)
+                total_profit = total_profit_sum + total_swap_sum
 
                 # فقط اگر سود تغییر کرده آپدیت کن
                 if abs(total_profit - self.last_profit) > 0.01:
@@ -620,7 +622,9 @@ def determine_broker_timezone():
                         # 4. سعی در گرفتن آخرین تیک نماد کامل
                         last_tick = mt5.symbol_info_tick(full_symbol)
                     except Exception as e:
-                        logging.error(f"⚠️ Error retrieving tick for {full_symbol}: {e}")
+                        logging.error(
+                            f"⚠️ Error retrieving tick for {full_symbol}: {e}"
+                        )
                         continue
                     break  # موفق شدیم، از حلقه خارج می‌شویم
 
@@ -739,13 +743,11 @@ def setup_database():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     # یک جدول برای نگهداری شناسه‌های پیام ایجاد می‌کنیم
-    cursor.execute(
-        """
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages_to_delete (
             message_id INTEGER PRIMARY KEY
         )
-    """
-    )
+    """)
     conn.commit()
     conn.close()
     logging.info("Database setup complete.")
@@ -2550,6 +2552,48 @@ def last_3_months_report(update, context):
 
 
 # ====================== توابع قالب‌بندی پیام‌ها ======================
+def format_market_order_open(deal, order=None):
+    """قالب پیام برای باز شدن پوزیشن مارکت"""
+    side = "🔵 Buy" if deal.type == mt5.DEAL_TYPE_BUY else "🔴 Sell"
+    comment_text = (
+        f"`Comment : {order.comment}\n\n`"
+        if order and getattr(order, "comment", None)
+        else ""
+    )
+    # زمان با ms در deal.time_msc مانند تابع دیگر
+    utc_time = (
+        datetime.fromtimestamp(deal.time_msc / 1000, tz=pytz.utc)
+        if getattr(deal, "time_msc", None)
+        else datetime.fromtimestamp(deal.time, tz=pytz.utc)
+    )
+    broker_tz = pytz.timezone(BROKER_TIMEZONE)
+    broker_dt_object = utc_time.astimezone(broker_tz)
+    milliseconds = deal.time_msc % 1000 if getattr(deal, "time_msc", None) else 0
+    broker_time_str = (
+        f"{broker_dt_object.strftime('%y/%m/%d..%H:%M:%S')}.{milliseconds:03d}"
+    )
+
+    account_info = mt5.account_info()
+    balance_equity_line = (
+        f"`Bal|Eq  : {account_info.balance:,.2f}|{account_info.equity:,.2f}`\n"
+        if account_info
+        else ""
+    )
+    broker_account_line = (
+        f"`{account_info.company}|Acc: {account_info.login}`\n" if account_info else ""
+    )
+
+    return (
+        f"**----- Market -----**\n\n"
+        f"{broker_account_line}"
+        f"{balance_equity_line}"
+        f"``{deal.symbol} {side} {deal.volume} \n"
+        f"`{deal.position_id}`\n"
+        f"{comment_text}"
+        f"`{broker_time_str}`"
+    )
+
+
 def format_pending_order_filled(deal, order):
     """قالب پیام برای فعال شدن اردر بر اساس deal و order"""
     side = "🔵 Buy" if deal.type == mt5.DEAL_TYPE_BUY else "🔴 Sell"
@@ -2754,7 +2798,9 @@ def get_server_time():
                         # 4. سعی در گرفتن آخرین تیک نماد کامل
                         last_tick = mt5.symbol_info_tick(full_symbol)
                     except Exception as e:
-                        logging.error(f"⚠️ Error retrieving tick for {full_symbol}: {e}")
+                        logging.error(
+                            f"⚠️ Error retrieving tick for {full_symbol}: {e}"
+                        )
                         continue
                     break  # موفق شدیم، از حلقه خارج می‌شویم
 
@@ -3024,10 +3070,21 @@ def main():
                         if deal.ticket in processed_deals:
                             continue
 
+                        # if deal.entry == mt5.DEAL_ENTRY_IN:
+                        #     order = mt5.history_orders_get(ticket=deal.order)
+                        #     if order and order[0].type in [2, 3, 4, 5]:
+                        #         msg = format_pending_order_filled(deal, order[0])
+                        #         send_telegram(msg)
                         if deal.entry == mt5.DEAL_ENTRY_IN:
                             order = mt5.history_orders_get(ticket=deal.order)
                             if order and order[0].type in [2, 3, 4, 5]:
+                                # Pending order filled
                                 msg = format_pending_order_filled(deal, order[0])
+                                send_telegram(msg)
+                            else:
+                                # Market order opened (یا order ممکن است None باشد)
+                                order_obj = order[0] if order else None
+                                msg = format_market_order_open(deal, order_obj)
                                 send_telegram(msg)
 
                         elif deal.entry in (
