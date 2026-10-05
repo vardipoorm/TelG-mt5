@@ -297,7 +297,7 @@ class FloatingProfitWindow:
                 "#00ff00" if profit > 0 else ("#ff0000" if profit < 0 else "#9B9B9A")
             )
 
-            self.label.config(text=f"💰 {profit_sign}{profit:,.2f} $", fg=color)
+            self.label.config(text=f"{profit_sign}{profit:,.2f}", fg=color)
 
         except Exception as e:
             logging.error(f"📊 Display update error: {e}")
@@ -3085,7 +3085,7 @@ def main():
                                 # Market order opened (یا order ممکن است None باشد)
                                 order_obj = order[0] if order else None
                                 msg = format_market_order_open(deal, order_obj)
-                                send_telegram(msg)
+                                # send_telegram(msg)
 
                         elif deal.entry in (
                             mt5.DEAL_ENTRY_OUT,
