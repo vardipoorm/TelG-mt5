@@ -175,9 +175,9 @@ class FloatingProfitWindow:
         self.is_running = False  # نخ کاملا مرده است
         # 3. 🔑 نکته کلیدی: Garbage Collector را فوراً اجرا کن
         # این کار تضمین می‌کند که آبجکت‌های Tkinter قبل از خروج کامل آزاد شوند
-        import gc
+        # import gc
 
-        gc.collect()
+        # gc.collect()
         self._cleanup_memory()
         # self.gui_thread = None
         # self.root = None
