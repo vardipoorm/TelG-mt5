@@ -173,6 +173,11 @@ class FloatingProfitWindow:
         self.label = None
         self.gui_thread = None
         self.is_running = False  # نخ کاملا مرده است
+        # 3. 🔑 نکته کلیدی: Garbage Collector را فوراً اجرا کن
+        # این کار تضمین می‌کند که آبجکت‌های Tkinter قبل از خروج کامل آزاد شوند
+        import gc
+
+        gc.collect()
         self._cleanup_memory()
         # self.gui_thread = None
         # self.root = None
@@ -277,6 +282,29 @@ class FloatingProfitWindow:
             # self.gui_thread = None  # نخ GUI کارش تمام شد
             # self._cleanup_memory()
             log_memory_usage("closing floating window")
+
+    def _safe_destroy(self):
+        """
+        این متد باید فقط از طریق root.after() فراخوانی شود
+        تا تضمین شود که در نخ GUI اجرا می‌شود.
+        """
+        try:
+            if self.root:
+                # حذف تمام ویجت‌ها
+                for widget in self.root.winfo_children():
+                    widget.destroy()
+
+                # destroy کردن خود پنجره
+                self.root.destroy()
+
+                # 🔑 مهم: رفرنس Tcl را حذف کن
+                # این کار از کرش Tcl_AsyncDelete جلوگیری می‌کند
+                # self.root.tk = None
+                self.root = None
+
+                logging.info("📊 Floating window destroyed safely")
+        except Exception as e:
+            logging.error(f"📊 Safe destroy error: {e}")
 
     def _update_profit_display(self, profit):
         """آپدیت نمایش سود"""
@@ -571,6 +599,32 @@ def floating_status(update, context):
         update.message.reply_text(status, parse_mode="Markdown")
     except Exception as e:
         update.message.reply_text(f"❌ خطا: {e}")
+
+
+def dump_memory_snapshot(update, context):
+    """گزارش وضعیت حافظه"""
+    import tracemalloc
+    import os
+    import psutil
+
+    try:
+        # حافظه فعلی پروسه
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / 1024 / 1024
+
+        # Top 10 مصرف‌کننده‌ها
+        snapshot = tracemalloc.take_snapshot()
+        top_stats = snapshot.statistics("lineno")
+
+        lines = [f"🧠 **Memory: {mem_mb:.2f} MB**\n"]
+        lines.append("**Top 10:**")
+        for i, stat in enumerate(top_stats[:10], 1):
+            lines.append(f"{i}. `{stat}`")
+
+        report = "\n".join(lines)
+        update.message.reply_text(report, parse_mode="Markdown")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error: {e}")
 
 
 # ===================================================================
@@ -2939,7 +2993,7 @@ def process_messages_for_clearing(sent_messages_info):
 
 # ====================== تابع اصلی مانیتورینگ ======================
 def main():
-    floating_profit.start_monitoring()
+    # floating_profit.start_monitoring()
     # +++ این دو خط را اضافه کنید +++
     setup_database()  # پایگاه داده را آماده می‌کند
     global alert_message_ids
@@ -3016,11 +3070,21 @@ def main():
             dispatcher.add_handler(CommandHandler("start_float", start_floating_window))
             dispatcher.add_handler(CommandHandler("stop_float", stop_floating_window))
             dispatcher.add_handler(CommandHandler("float_status", floating_status))
+            dispatcher.add_handler(CommandHandler("mem", dump_memory_snapshot))
             dispatcher.add_error_handler(handle_error)
             # اگر همه چیز موفق بود، از حلقه راه‌اندازی خارج می‌شویم
             updater.start_polling()  # راه اندازی شنونده
             logging.info("Listener started successfully.")
             # logging.info("Telegram connection successful. Starting main operations.")
+            # ⭐ اینجا، بعد از راه‌اندازی کامل تلگرام، پنجره شناور را خودکار باز کن
+            # کمی صبر کن تا نخ‌های تلگرام کاملاً مستقر شوند
+            time.sleep(2)
+            try:
+                result = floating_profit.start_monitoring()
+                logging.info(f"📊 Auto-start floating window")  #: {result}")
+            except Exception as e:
+                logging.error(f"📊 Auto-start floating window failed: {e}")
+
             break
 
         except Exception as e:
@@ -3249,7 +3313,10 @@ def main():
 
 # ====================== اجرای اسکریپت ======================
 if __name__ == "__main__":
+    import tracemalloc
 
+    tracemalloc.start(25)
+    logging.info("🔍 tracemalloc started")
     # --- بخش جدید: حلقه برای اطمینان از تشخیص منطقه زمانی ---
     while True:
         BROKER_TIMEZONE = determine_broker_timezone()
@@ -3261,6 +3328,7 @@ if __name__ == "__main__":
         # اگر ناموفق بود، ۱۰ ثانیه صبر کرده و دوباره تلاش کن
         logging.info("Retrying timezone detection in 10 seconds...")
         time.sleep(10)
+
     # +++ حلقه نگهبان برای اجرای بی‌پایان اسکریپت +++
 try:
     while True:
@@ -3313,9 +3381,28 @@ finally:
     #         floating_profit.gui_thread.join(timeout=3)
     #     logging.info("Floating window stopped.")
 
+    # # 1. خاموش کردن تضمینی پنجره شناور (با انتظار)
+    # if "floating_profit" in globals():
+    #     floating_profit.clean_exit()  # <--- استفاده از متد جدید
     # 1. خاموش کردن تضمینی پنجره شناور (با انتظار)
-    if "floating_profit" in globals():
-        floating_profit.clean_exit()  # <--- استفاده از متد جدید
+    if "floating_profit" in globals() and floating_profit:
+        floating_profit.is_monitoring = False
+        floating_profit.is_running = False
+
+        if floating_profit.root:
+            try:
+                floating_profit.root.after(0, floating_profit._safe_destroy)
+            except Exception:
+                pass
+
+        if floating_profit.gui_thread and floating_profit.gui_thread.is_alive():
+            floating_profit.gui_thread.join(timeout=3)
+
+        import gc
+
+        gc.collect()
+        # logging.info("Floating window destroyed.")
+
     # 2. توقف شنونده تلگرام
     if updater and updater.running:
         logging.info("Stopping updater...")
