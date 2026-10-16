@@ -125,6 +125,8 @@ def log_memory_usage(operation_name=""):
 
 
 class FloatingProfitWindow:
+    USD_TO_TOMAN = 250_000
+
     def __init__(self):
         self.is_monitoring = False
         self.monitor_thread = None
@@ -201,28 +203,24 @@ class FloatingProfitWindow:
 
             # محاسبه موقعیت وسط بالا
             screen_width = self.root.winfo_screenwidth()
-            screen_height = self.root.winfo_screenheight()
-            window_width = 300
-            window_height = 55
-
-            x_position = (screen_width - window_width) // 2  # وسط افقی
-            y_position = 1  # 10 پیکسل از بالا
-
-            self.root.geometry(
-                f"{window_width}x{window_height}+{x_position}+{y_position}"
-            )
 
             # لیبل برای نمایش سود
             self.label = tk.Label(
                 self.root,
-                text="💰 0.00 $",
-                font=("Arial", 30, "bold"),
+                text="0(0)",
+                font=("arial", 35),
                 fg="white",
-                bg="black",
-                padx=0,
-                pady=0,
+                bg="#19191A",
+                padx=10,
+                pady=5,
             )
             self.label.pack(expand=True)
+            self.root.update_idletasks()
+
+            window_width = self.root.winfo_reqwidth()
+            x_position = (screen_width - window_width) // 2
+            y_position = 1
+            self.root.geometry(f"+{x_position}+{y_position}")
 
             # امکان drag کردن پنجره
             self.label.bind("<Button-1>", self._start_drag)
@@ -325,7 +323,22 @@ class FloatingProfitWindow:
                 "#00ff00" if profit > 0 else ("#ff0000" if profit < 0 else "#9B9B9A")
             )
 
-            self.label.config(text=f"{profit_sign}{profit:,.2f}", fg=color)
+            toman_profit = profit * self.USD_TO_TOMAN
+            dollar_profit = f"{profit:,.2f}".rstrip("0").rstrip(".")
+            display_text = f"{toman_profit:,.0f} ({dollar_profit})"
+            if self.label.cget("text") != display_text:
+                window_x = self.root.winfo_x()
+                window_y = self.root.winfo_y()
+                old_width = self.root.winfo_width()
+
+                self.label.config(text=display_text, fg=color)
+                self.root.update_idletasks()
+
+                new_width = self.root.winfo_reqwidth()
+                centered_x = window_x + (old_width - new_width) // 2
+                self.root.geometry(f"+{centered_x}+{window_y}")
+            else:
+                self.label.config(fg=color)
 
         except Exception as e:
             logging.error(f"📊 Display update error: {e}")
@@ -1113,6 +1126,21 @@ def send_telegram(text):
             logging.error(
                 f"Telegram Send Error retrying... ({i+1}/{RETRY_COUNT})"
             )  #: {e}")
+            # ⭐ هر ۱۰۰ تلاش، حافظه رو آزاد کن
+            if i % 100 == 0:
+                import gc
+
+                gc.collect()
+                alive = [t for t in threading.enumerate() if t.is_alive()]
+                logging.warning(
+                    f"♻️ Cleaned up after {i} retries. Active threads: {len(alive)}"
+                )
+
+                # ⭐ اگه تعداد نخ‌ها خیلی زیاد شد، لاگ هشدار بده
+                if len(alive) > 50:
+                    logging.critical(
+                        f"🚨 Too many threads: {len(alive)}! Memory may leak."
+                    )
 
     # اگر همه تلاش‌ها ناموفق بود
     logging.critical("❌Could not send message to Telegram after all retries.")
