@@ -145,6 +145,7 @@ class FloatingProfitWindow:
         # مختصات drag
         self.start_x = 0
         self.start_y = 0
+        self.user_moved_window = False
 
     def clean_exit(self):
         """خاموش کردن کامل پنجره و منتظر ماندن برای پایان نخ GUI"""
@@ -191,6 +192,7 @@ class FloatingProfitWindow:
             # self.root.withdraw()  # مشکل اینجا
 
             self.gui_ready_event.clear()  # اعلام می‌کنیم که GUI در حال ساخت است
+            self.user_moved_window = False
             # حذف titlebar و border
             self.root.overrideredirect(True)
 
@@ -248,6 +250,7 @@ class FloatingProfitWindow:
         x = self.root.winfo_x() + (event.x - self.start_x)
         y = self.root.winfo_y() + (event.y - self.start_y)
         self.root.geometry(f"+{x}+{y}")
+        self.user_moved_window = True
 
     def _close_window(self, event):
         """بستن پنجره با دابل کلیک (فقط پنهان کردن)"""
@@ -335,7 +338,10 @@ class FloatingProfitWindow:
                 self.root.update_idletasks()
 
                 new_width = self.root.winfo_reqwidth()
-                centered_x = window_x + (old_width - new_width) // 2
+                if profit > 0:
+                    centered_x = window_x + (old_width - new_width) // 2
+                else:
+                    centered_x = window_x + (old_width - new_width) // 2
                 self.root.geometry(f"+{centered_x}+{window_y}")
             else:
                 self.label.config(fg=color)
