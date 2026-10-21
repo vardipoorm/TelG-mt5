@@ -338,10 +338,22 @@ class FloatingProfitWindow:
                 self.root.update_idletasks()
 
                 new_width = self.root.winfo_reqwidth()
-                if profit > 0:
-                    centered_x = window_x + (old_width - new_width) // 2
-                else:
-                    centered_x = window_x + (old_width - new_width) // 2
+                centered_x = window_x + int((old_width - new_width) / 2)
+                # old_text = self.label.cget("text")
+                # if centered_x != window_x:
+                #     logging.info(
+                #         "📊 Floating window reposition: "
+                #         "x=%s -> %s (delta=%+d), width=%s -> %s, "
+                #         "text=%r -> %r, user_moved=%s",
+                #         window_x,
+                #         centered_x,
+                #         centered_x - window_x,
+                #         old_width,
+                #         new_width,
+                #         old_text,
+                #         display_text,
+                #         self.user_moved_window,
+                #     )
                 self.root.geometry(f"+{centered_x}+{window_y}")
             else:
                 self.label.config(fg=color)
