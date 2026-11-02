@@ -670,7 +670,7 @@ def determine_broker_timezone():
     if not mt5.initialize(path=MT5_PATH):
         logging.error("Could not connect to MT5 to determine timezone.")
         return None
-    PRIORITY_BASE_SYMBOLS = ["BTCUSD.x", "XAUUSD.x"]
+    PRIORITY_BASE_SYMBOLS = ["BTCUSD", "XAUUSD"]
     # 2. دریافت لیست تمام نمادهای موجود در سرور
     # این لیست برای پیدا کردن پسوندها ضروری است.
     all_symbols_on_server = mt5.symbols_get()
@@ -2857,7 +2857,7 @@ def get_server_time():
     #         return None
 
     # def get_server_time():
-    PRIORITY_BASE_SYMBOLS = ["BTCUSD.x", "XAUUSD.x"]
+    PRIORITY_BASE_SYMBOLS = ["BTCUSD", "XAUUSD"]
 
     # 2. دریافت لیست تمام نمادهای موجود در سرور
     # این لیست برای پیدا کردن پسوندها ضروری است.
