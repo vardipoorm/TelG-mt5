@@ -125,7 +125,7 @@ def log_memory_usage(operation_name=""):
 
 
 class FloatingProfitWindow:
-    USD_TO_TOMAN = 250_000
+    USD_TO_TOMAN = 270_000
 
     def __init__(self):
         self.is_monitoring = False
@@ -210,11 +210,11 @@ class FloatingProfitWindow:
             self.label = tk.Label(
                 self.root,
                 text="0(0)",
-                font=("arial", 35),
+                font=("arial", 27),
                 fg="white",
                 bg="#19191A",
                 padx=10,
-                pady=5,
+                pady=0,
             )
             self.label.pack(expand=True)
             self.root.update_idletasks()
@@ -2730,6 +2730,25 @@ def format_pending_order_filled(deal, order):
     )
 
 
+def format_position_duration(open_time_msc, close_time_msc):
+    duration_seconds = max(0, (close_time_msc - open_time_msc) // 1000)
+    units = (
+        (365 * 24 * 60 * 60, "y"),
+        (30 * 24 * 60 * 60, "mo"),
+        (7 * 24 * 60 * 60, "w"),
+        (24 * 60 * 60, "d"),
+        (60 * 60, "h"),
+        (60, "m"),
+        (1, "s"),
+    )
+    parts = []
+    for unit_seconds, unit_label in units:
+        value, duration_seconds = divmod(duration_seconds, unit_seconds)
+        if value:
+            parts.append(f"{value}{unit_label}")
+    return " ".join(parts) or "0s"
+
+
 def format_position_closed(
     deal,
     original_order_comment,
@@ -2739,6 +2758,7 @@ def format_position_closed(
     total_position_commission,
     total_position_swap,
     total_sign,
+    position_open_time_msc=None,
 ):
     """قالب پیام برای بسته شدن پوزیشن با کامنت اصلی"""
     side = "🔴 Sell" if deal.type == mt5.DEAL_TYPE_BUY else "🔵 Buy"
@@ -2781,6 +2801,11 @@ def format_position_closed(
     # --- بخش جدید: ساخت خط اطلاعات بروکر و حساب ---
     broker_account_line = (
         f"`{account_info.company} | {account_info.login}`\n" if account_info else ""
+    )
+    duration_line = (
+        f"`Duration: {format_position_duration(position_open_time_msc, deal.time_msc)}`\n"
+        if is_complete_close and position_open_time_msc is not None
+        else ""
     )
     # --- بخش جدید: نمایش هوشمند حجم معامله ---
     commission_pos = 0.0
@@ -2830,6 +2855,7 @@ def format_position_closed(
         f"`Comm/sw: {commission_pos}/{swap_pos}`\n"
         f"`Lots   : {lots}`\n"
         f"`ID     : {deal.position_id}`\n"
+        f"{duration_line}"
         f"{comment_text}"
         f"`{broker_time_str}`"
     )
@@ -3212,12 +3238,21 @@ def main():
                             total_position_profit = 0.0
                             total_position_commission = 0.0
                             total_position_swap = 0.0
+                            position_open_time_msc = None
                             position_deals = mt5.history_deals_get(
                                 position=deal.position_id
                             )
                             if position_deals:
                                 for opening_deal in position_deals:
                                     if opening_deal.entry == mt5.DEAL_ENTRY_IN:
+                                        if (
+                                            position_open_time_msc is None
+                                            or opening_deal.time_msc
+                                            < position_open_time_msc
+                                        ):
+                                            position_open_time_msc = (
+                                                opening_deal.time_msc
+                                            )
                                         # حجم و کامنت را از معامله ورودی استخراج می‌کنیم
                                         initial_volume = opening_deal.volume
                                         opening_order = mt5.history_orders_get(
@@ -3267,6 +3302,7 @@ def main():
                                 total_position_commission,
                                 total_position_swap,
                                 total_sign,
+                                position_open_time_msc,
                             )
                             send_telegram(msg)
 
